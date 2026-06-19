@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>cr-chess</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="board-hit-grid" class="hidden"></div>
+    <main id="app" class="hidden">
+        <div id="feedback-stack"></div>
+        <section id="result-overlay" class="hidden"></section>
+        <section id="table-menu" class="hidden"></section>
+        <section id="side-panel">
+            <header class="topbar">
+                <div>
+                    <div id="match-title">Chess</div>
+                    <div id="match-subtitle">No active match</div>
+                </div>
+                <button id="close" title="Close">x</button>
+            </header>
+
+            <nav class="tabs">
+                <button class="tab active" data-tab="moves">Moves</button>
+                <button class="tab" data-tab="board">Board</button>
+                <button class="tab" data-tab="stats">Stats</button>
+            </nav>
+
+            <section id="moves-tab" class="tab-pane active">
+                <div id="turn-card" class="status-card">Waiting for match data</div>
+                <button id="resign-match" class="wide-button danger hidden">Resign Match</button>
+                <div id="moves-list" class="moves-list"></div>
+                <div id="review-card" class="review hidden"></div>
+            </section>
+
+            <section id="board-tab" class="tab-pane">
+                <div id="nui-board" class="board"></div>
+                <div id="selected-label" class="selected-label">Select a piece</div>
+            </section>
+
+            <section id="stats-tab" class="tab-pane">
+                <button id="refresh-leaderboard" class="wide-button">Refresh Leaderboard</button>
+                <div id="leaderboard" class="leaderboard"></div>
+                <div id="profile" class="profile"></div>
+            </section>
+        </section>
+    </main>
+    <script src="app.js"></script>
+</body>
+</html>
