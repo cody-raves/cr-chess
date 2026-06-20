@@ -12,6 +12,79 @@ Config.TablePlacement = {
     rotateFastStep = 15.0,
     previewAlpha = 165
 }
+Config.BotVsBotMoveDelayMs = 850
+Config.BotAI = {
+    hardDepth = 2,
+    hardRootMoveLimit = 14,
+    hardBranchMoveLimit = 10
+}
+Config.Clock = {
+    enabled = true,
+    initialMinutes = 10,
+    incrementSeconds = 0,
+    lowTimeMs = 30000,
+    timeoutSlackMs = 250
+}
+Config.Spectator = {
+    radius = 0.95,
+    minRadius = 0.55,
+    maxRadius = 1.65,
+    height = 0.72,
+    minHeight = 0.35,
+    maxHeight = 1.15,
+    mouseSensitivity = 135.0,
+    verticalSensitivity = 0.55,
+    zoomStep = 0.08,
+    focusLerp = 2.2,
+    cameraLerp = 8.0,
+    focusHeight = 0.08,
+    lastMoveFocusMs = 2600,
+    moveFollowExtraMs = 450,
+    fov = 55.0
+}
+Config.SpectatorDui = {
+    enabled = true,
+    ambient = true,
+    showIdleTables = true,
+    drawDistance = 8.0,
+    maxAmbientDuis = 4,
+    syncIntervalMs = 5000,
+    hideSidePanel = true,
+    width = 576,
+    height = 792,
+    screenWidth = 0.155,
+    screenHeight = 0.213,
+    offset = { x = 0.0, y = 0.0, z = 1.20 },
+    distanceScale = {
+        enabled = true,
+        nearDistance = 2.0,
+        farDistance = 8.0,
+        nearScreenWidth = 0.155,
+        nearScreenHeight = 0.213,
+        farScreenWidth = 0.078,
+        farScreenHeight = 0.107,
+        nearOffsetZ = 1.20,
+        farOffsetZ = 1.80,
+        nearAlpha = 242,
+        farAlpha = 210
+    },
+    alpha = 242,
+    perspective = 'white'
+}
+Config.AttractMode = {
+    enabled = true,
+    whiteDifficulty = 'easy',
+    blackDifficulty = 'easy',
+    heartbeatIntervalMs = 4000,
+    releaseAfterMs = 15000
+}
+Config.SpectatorBets = {
+    enabled = true,
+    closeAfterSeconds = 30,
+    account = 'cash',
+    amounts = { 100, 500, 1000 },
+    houseCutPercent = 0
+}
 Config.DefaultRating = 800
 Config.EloK = 32
 
@@ -75,6 +148,10 @@ Config.Wagers = {
     houseCutPercent = 0
 }
 
+Config.Identity = {
+    framework = 'auto' -- auto, qbox, qb, esx, none
+}
+
 Config.Camera = {
     white = {
         offset = { x = 0.000, y = -0.620, z = 0.520 },
@@ -85,6 +162,37 @@ Config.Camera = {
         offset = { x = 0.000, y = 0.620, z = 0.520 },
         lookAt = { x = 0.000, y = -0.040, z = 0.045 },
         fov = 75.0
+    },
+    topDown = {
+        white = {
+            offset = { x = 0.000, y = -0.020, z = 0.900 },
+            lookAt = { x = 0.000, y = 0.000, z = 0.020 },
+            fov = 42.0
+        },
+        black = {
+            offset = { x = 0.000, y = 0.020, z = 0.900 },
+            lookAt = { x = 0.000, y = 0.000, z = 0.020 },
+            fov = 42.0
+        }
+    }
+}
+
+Config.CapturedPieces = {
+    white = {
+        offset = { x = -0.315, y = -0.215, z = 0.000 },
+        headingOffset = 0.0,
+        rotation = { x = 0.0, y = 0.0, z = 90.0 },
+        rowSize = 8,
+        columnStep = { x = 0.060, y = 0.000, z = 0.000 },
+        rowStep = { x = 0.000, y = -0.050, z = 0.000 }
+    },
+    black = {
+        offset = { x = 0.270, y = -0.210, z = 0.010 },
+        headingOffset = 180.0,
+        rotation = { x = 0.0, y = 0.0, z = -90.0 },
+        rowSize = 8,
+        columnStep = { x = -0.060, y = 0.000, z = 0.000 },
+        rowStep = { x = 0.000, y = 0.050, z = 0.000 }
     }
 }
 
@@ -125,6 +233,8 @@ Config.BoardLight = {
 Config.Sounds = {
     enabled = true,
     volume = 0.55,
+    drawDistance = 8.0,
+    fadeStartDistance = 4.5,
     move = {
         'sfx/1.ogg',
         'sfx/2.ogg',

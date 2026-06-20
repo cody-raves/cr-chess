@@ -175,6 +175,36 @@ function Stats.leaderboardRows(limit)
     return rows
 end
 
+function Stats.playerSummary(identifier, name)
+    if not identifier then
+        return nil
+    end
+
+    if identifier:sub(1, 4) == 'bot:' then
+        return {
+            identifier = identifier,
+            name = name or 'Bot',
+            rating = nil,
+            rankName = 'Bot',
+            gamesPlayed = 0
+        }
+    end
+
+    local player = Stats.ensure(identifier, name)
+
+    if not player then
+        return nil
+    end
+
+    return {
+        identifier = player.identifier,
+        name = player.name,
+        rating = player.rating,
+        rankName = Stats.rankName(player.rating),
+        gamesPlayed = player.gamesPlayed
+    }
+end
+
 function Stats.addMatchHistory(match)
     local record = {
         id = match.id,

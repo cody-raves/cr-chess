@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>cr-chess spectator</title>
+    <link rel="stylesheet" href="spectator.css">
+</head>
+<body>
+    <main id="dui" class="dui hidden">
+        <section class="dui-shell">
+            <header class="dui-header">
+                <div>
+                    <div id="match-label" class="match-label">Match</div>
+                    <div id="turn-label" class="turn-label">Waiting</div>
+                </div>
+                <div id="mode-pill" class="mode-pill">casual</div>
+            </header>
+
+            <section class="players">
+                <div id="white-player" class="player white">
+                    <div>
+                        <span class="color-dot"></span>
+                        <strong class="name">White</strong>
+                        <span class="rank">Unrated</span>
+                    </div>
+                    <time>--:--</time>
+                </div>
+                <div id="black-player" class="player black">
+                    <div>
+                        <span class="color-dot"></span>
+                        <strong class="name">Black</strong>
+                        <span class="rank">Unrated</span>
+                    </div>
+                    <time>--:--</time>
+                </div>
+            </section>
+
+            <section id="betting" class="betting">
+                <div>
+                    <span>White pool</span>
+                    <strong id="bet-white">$0</strong>
+                </div>
+                <div class="bet-status">
+                    <span>Spectator bets</span>
+                    <strong id="bet-status">Closed</strong>
+                    <em>30s window | /chess_bet white 100</em>
+                </div>
+                <div>
+                    <span>Black pool</span>
+                    <strong id="bet-black">$0</strong>
+                </div>
+            </section>
+
+            <section class="content">
+                <div id="mini-board" class="mini-board"></div>
+                <aside class="move-card">
+                    <span id="last-move-piece" class="move-piece-icon">·</span>
+                    <strong id="last-move">No moves yet</strong>
+                </aside>
+            </section>
+
+            <section id="animation-layer" class="animation-layer"></section>
+        </section>
+    </main>
+    <script src="spectator.js"></script>
+</body>
+</html>

@@ -28,14 +28,20 @@ RegisterCommand('chess_help', function()
         '/chess_create casual',
         '/chess_create ranked',
         '/chess_create bot easy|medium|hard',
+        '/chess_test_bots [whiteDifficulty] [blackDifficulty]',
+        '/chess_spectate [matchId]',
+        '/chess_spectate_stop',
+        '/chess_bet white|black <amount> [matchId]',
         '/chess_interact',
+        '/chess_camera [normal|top] (or H)',
         '/chess_menu',
         '/chess_sound take|taken|win|lose|draw [index]',
         '/chess_sound sfx/take_piece.ogg',
         '/chess_sound <soundName> <soundSet>',
         '/chess_anim take|taken|win|lose|draw',
         '/chess_tune',
-        '/chess_tune_target seat_white|seat_black|camera_white|camera_black',
+        '/chess_tune_target seat_white|seat_black|camera_white|camera_black|captured_white|captured_black',
+        '/chess_captured_flip [white|black|both] north|south|east|west|left|right|flip',
         '/chess_light',
         '/chess_uv_debug',
         '/chess_gizmo_seat white|black',
@@ -66,6 +72,22 @@ RegisterCommand('chess_create', function(_, args)
     TriggerServerEvent('cr-chess:server:createMatch', args, playerCoords())
 end, false)
 
+RegisterCommand('chess_test_bots', function(_, args)
+    TriggerServerEvent('cr-chess:server:testBotMatch', playerCoords(), args[1] or 'easy', args[2] or args[1] or 'easy')
+end, false)
+
+RegisterCommand('chess_spectate', function(_, args)
+    TriggerServerEvent('cr-chess:server:spectateMatch', args[1], playerCoords())
+end, false)
+
+RegisterCommand('chess_spectate_stop', function()
+    TriggerEvent('cr-chess:client:stopSpectating')
+end, false)
+
+RegisterCommand('chess_bet', function(_, args)
+    TriggerEvent('cr-chess:client:placeSpectatorBet', args)
+end, false)
+
 RegisterCommand('chess_join', function(_, args)
     TriggerServerEvent('cr-chess:server:joinMatch', args[1], args[2])
 end, false)
@@ -73,6 +95,12 @@ end, false)
 RegisterCommand('chess_interact', function()
     TriggerEvent('cr-chess:client:toggleInteract')
 end, false)
+
+RegisterCommand('chess_camera', function(_, args)
+    TriggerEvent('cr-chess:client:toggleCameraMode', args[1])
+end, false)
+
+RegisterKeyMapping('chess_camera', 'Toggle chess camera view', 'keyboard', 'H')
 
 RegisterCommand('chess_menu', function()
     TriggerEvent('cr-chess:client:openTableMenu')
@@ -92,6 +120,10 @@ end, false)
 
 RegisterCommand('chess_tune_target', function(_, args)
     TriggerEvent('cr-chess:client:setTuneTarget', args[1])
+end, false)
+
+RegisterCommand('chess_captured_flip', function(_, args)
+    TriggerEvent('cr-chess:client:capturedDirection', args[1], args[2])
 end, false)
 
 RegisterCommand('chess_light', function()

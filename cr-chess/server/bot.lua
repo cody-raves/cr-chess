@@ -5,6 +5,11 @@ CRChess.Bot = Bot
 
 local Engine = CRChess.Engine
 
+local function botConfig()
+    local config = rawget(_G, 'Config')
+    return config and config.BotAI or {}
+end
+
 local function shuffled(moves)
     local copy = {}
 
@@ -42,6 +47,49 @@ local function moveScore(state, move, color)
     return score + Engine.evaluateMaterial(clone, color)
 end
 
+local function quickMoveScore(state, move)
+    local score = 0
+
+    if move.capture then
+        local capturedPiece = state.board[move.capture] or state.board[move.to]
+        score = score + Engine.materialValue(capturedPiece) * 10 + 100
+    end
+
+    if move.promotion then
+        score = score + Engine.materialValue(Engine.colorPrefix(state.turn) .. move.promotion:upper()) * 10
+    end
+
+    if move.castle then
+        score = score + 25
+    end
+
+    return score
+end
+
+local function orderedMoves(state, moves, limit)
+    local scored = {}
+
+    for index, move in ipairs(shuffled(moves)) do
+        scored[index] = {
+            move = move,
+            score = quickMoveScore(state, move)
+        }
+    end
+
+    table.sort(scored, function(left, right)
+        return left.score > right.score
+    end)
+
+    local ordered = {}
+    local maxMoves = limit and math.min(#scored, limit) or #scored
+
+    for index = 1, maxMoves do
+        ordered[index] = scored[index].move
+    end
+
+    return ordered
+end
+
 local function chooseBestHeuristic(state, color)
     local moves = shuffled(Engine.generateLegalMoves(state, color))
     local bestMove = nil
@@ -59,23 +107,23 @@ local function chooseBestHeuristic(state, color)
     return bestMove
 end
 
-local function minimax(state, depth, botColor, alpha, beta)
-    local status = Engine.status(state)
+local function minimax(state, depth, botColor, alpha, beta, branchLimit)
+    local moves = Engine.generateLegalMoves(state, state.turn)
 
-    if status.checkmate then
-        return status.winner == botColor and 100000 or -100000
-    end
+    if #moves == 0 then
+        if Engine.isInCheck(state, state.turn) then
+            return state.turn == botColor and -100000 or 100000
+        end
 
-    if status.stalemate then
         return 0
     end
 
-    if depth == 0 then
-        local mobility = #Engine.generateLegalMoves(state, botColor)
+    if depth <= 0 then
+        local mobility = state.turn == botColor and #moves or -#moves
         return Engine.evaluateMaterial(state, botColor) + mobility
     end
 
-    local moves = Engine.generateLegalMoves(state, state.turn)
+    moves = orderedMoves(state, moves, branchLimit)
     local maximizing = state.turn == botColor
 
     if maximizing then
@@ -84,7 +132,7 @@ local function minimax(state, depth, botColor, alpha, beta)
         for _, move in ipairs(moves) do
             local clone = Engine.cloneState(state)
             Engine.applyMoveUnchecked(clone, move)
-            best = math.max(best, minimax(clone, depth - 1, botColor, alpha, beta))
+            best = math.max(best, minimax(clone, depth - 1, botColor, alpha, beta, branchLimit))
             alpha = math.max(alpha, best)
 
             if beta <= alpha then
@@ -100,7 +148,7 @@ local function minimax(state, depth, botColor, alpha, beta)
     for _, move in ipairs(moves) do
         local clone = Engine.cloneState(state)
         Engine.applyMoveUnchecked(clone, move)
-        best = math.min(best, minimax(clone, depth - 1, botColor, alpha, beta))
+        best = math.min(best, minimax(clone, depth - 1, botColor, alpha, beta, branchLimit))
         beta = math.min(beta, best)
 
         if beta <= alpha then
@@ -112,14 +160,18 @@ local function minimax(state, depth, botColor, alpha, beta)
 end
 
 local function chooseMinimax(state, color)
-    local moves = shuffled(Engine.generateLegalMoves(state, color))
+    local config = botConfig()
+    local depth = math.max(1, tonumber(config.hardDepth) or 2)
+    local rootLimit = tonumber(config.hardRootMoveLimit) or 14
+    local branchLimit = tonumber(config.hardBranchMoveLimit) or 10
+    local moves = orderedMoves(state, Engine.generateLegalMoves(state, color), rootLimit)
     local bestMove = nil
     local bestScore = -math.huge
 
     for _, move in ipairs(moves) do
         local clone = Engine.cloneState(state)
         Engine.applyMoveUnchecked(clone, move)
-        local score = minimax(clone, 2, color, -math.huge, math.huge)
+        local score = minimax(clone, depth - 1, color, -math.huge, math.huge, branchLimit)
 
         if score > bestScore then
             bestMove = move

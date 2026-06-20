@@ -3,6 +3,7 @@ local currentMatch = nil
 local tableCamera = nil
 local ensureSeatForMatch
 local ensureBotPedForMatch
+local clearBotPed
 local seatLocalPedOnTable
 local applySeatTransform
 local reconcileSeatAvatars
@@ -16,6 +17,8 @@ local drawText2d
 local registerTableTargets
 local unregisterTableTargets
 local openTableMenu
+local sendSnapshotToNui
+local crChessDestroyAmbientDui
 local lastBoardOverlayAt = 0
 local seated = {
     active = false,
@@ -42,10 +45,17 @@ local hiddenRemoteSeatSources = {}
 
 local interaction = {
     enabled = false,
+    cameraMode = 'normal',
     selected = nil,
     selectedPiece = nil,
     legalMoves = {},
     legalByTo = {}
+}
+
+local lastMoveHover = {
+    visible = false,
+    move = nil,
+    outlinedEntity = nil
 }
 
 local uvDebug = {
@@ -60,13 +70,17 @@ local tuning = {
         'seat_white',
         'seat_black',
         'camera_white',
-        'camera_black'
+        'camera_black',
+        'captured_white',
+        'captured_black'
     }
 }
 
 local tunePreview = {
     ped = nil,
-    target = nil
+    target = nil,
+    captured = {},
+    capturedTarget = nil
 }
 
 local tablePlacement = {
@@ -79,13 +93,46 @@ local tablePlacement = {
     requestId = nil
 }
 
+local spectator = {
+    active = false,
+    matchId = nil,
+    tableId = nil,
+    camera = nil,
+    yaw = 180.0,
+    radius = nil,
+    height = nil,
+    focus = nil,
+    camCoords = nil,
+    lastUpdate = 0,
+    followEntity = nil,
+    followUntil = 0,
+    focusSquare = nil,
+    focusUntil = 0,
+    snapshot = nil,
+    dui = {
+        dui = nil,
+        txd = nil,
+        txn = nil,
+        txdName = 'cr_chess_spectator_dui',
+        txnName = 'overlay',
+        lastKey = nil,
+        lastAmbientSyncAt = 0,
+        lastAttractSeenAt = {},
+        ambient = {}
+    }
+}
+
+local observedMatches = {}
+
 local files = { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h' }
 
 local tuningFields = {
     seat_white = { 'x', 'y', 'z', 'rotX', 'rotY', 'rotZ' },
     seat_black = { 'x', 'y', 'z', 'rotX', 'rotY', 'rotZ' },
     camera_white = { 'x', 'y', 'z', 'lookX', 'lookY', 'lookZ', 'fov' },
-    camera_black = { 'x', 'y', 'z', 'lookX', 'lookY', 'lookZ', 'fov' }
+    camera_black = { 'x', 'y', 'z', 'lookX', 'lookY', 'lookZ', 'fov' },
+    captured_white = { 'x', 'y', 'z', 'rotX', 'rotY', 'rotZ' },
+    captured_black = { 'x', 'y', 'z', 'rotX', 'rotY', 'rotZ' }
 }
 
 local function notify(message)
@@ -114,6 +161,53 @@ local function playNuiSoundFile(file, volume)
     })
 end
 
+local function soundDistanceVolume(rendered)
+    local sounds = Config.Sounds or {}
+    local baseVolume = tonumber(sounds.volume) or 0.55
+
+    if sounds.enabled == false then
+        return 0.0
+    end
+
+    if sounds.distanceEnabled == false then
+        return baseVolume
+    end
+
+    if not rendered or not rendered.board or not DoesEntityExist(rendered.board) then
+        return baseVolume
+    end
+
+    local maxDistance = tonumber(sounds.drawDistance)
+        or tonumber(Config.SpectatorDui and Config.SpectatorDui.drawDistance)
+        or 8.0
+
+    if maxDistance <= 0.0 then
+        return baseVolume
+    end
+
+    local fadeStart = tonumber(sounds.fadeStartDistance) or (maxDistance * 0.65)
+    fadeStart = math.max(0.0, math.min(fadeStart, maxDistance - 0.01))
+
+    local playerCoords = GetEntityCoords(PlayerPedId())
+    local boardCoords = GetEntityCoords(rendered.board)
+    local dx = playerCoords.x - boardCoords.x
+    local dy = playerCoords.y - boardCoords.y
+    local dz = playerCoords.z - boardCoords.z
+    local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    if distance > maxDistance then
+        return 0.0
+    end
+
+    if distance <= fadeStart then
+        return baseVolume
+    end
+
+    local t = (distance - fadeStart) / (maxDistance - fadeStart)
+
+    return baseVolume * (1.0 - math.max(0.0, math.min(1.0, t)))
+end
+
 local function setNuiVisible(visible, focus)
     if focus == nil then
         focus = visible
@@ -132,8 +226,12 @@ local function setNuiVisible(visible, focus)
     end)
 end
 
-local function playMoveSound()
+local function playMoveSound(volume)
     if not Config.Sounds or not Config.Sounds.enabled then
+        return
+    end
+
+    if volume ~= nil and volume <= 0.0 then
         return
     end
 
@@ -143,7 +241,7 @@ local function playMoveSound()
         return
     end
 
-    playNuiSoundFile(sounds[math.random(#sounds)])
+    playNuiSoundFile(sounds[math.random(#sounds)], volume)
 end
 
 local function localColorForSnapshot(snapshot)
@@ -194,11 +292,15 @@ local function feedbackSoundList(kind)
     return Config.Sounds.feedback[kind]
 end
 
-local function playFeedbackSound(kind)
+local function playFeedbackSound(kind, volume)
+    if volume ~= nil and volume <= 0.0 then
+        return
+    end
+
     local sounds = feedbackSoundList(kind)
 
     if sounds and #sounds > 0 then
-        playNuiSoundFile(sounds[math.random(#sounds)])
+        playNuiSoundFile(sounds[math.random(#sounds)], volume)
         return
     end
 
@@ -345,7 +447,33 @@ local function pieceName(pieceCode)
     return (Config.PieceNames and Config.PieceNames[pieceCode]) or tostring(pieceCode or 'piece')
 end
 
-local function showMoveFeedback(snapshot)
+function crChessMoveColorFromSnapshot(snapshot, move)
+    move = move or (snapshot and snapshot.lastMove or nil)
+
+    if not snapshot or not move then
+        return nil
+    end
+
+    if move.color then
+        return move.color
+    end
+
+    if snapshot.moveHistory then
+        local latest = snapshot.moveHistory[#snapshot.moveHistory]
+
+        if latest
+            and latest.from == move.from
+            and latest.to == move.to
+            and latest.capturedPiece == move.capturedPiece
+        then
+            return latest.color
+        end
+    end
+
+    return nil
+end
+
+local function showMoveFeedback(snapshot, soundVolume)
     local move = snapshot and snapshot.lastMove or nil
 
     if not move or not move.capturedPiece then
@@ -358,19 +486,7 @@ local function showMoveFeedback(snapshot)
         return
     end
 
-    local moveColor = move.color
-
-    if not moveColor and snapshot.moveHistory then
-        local latest = snapshot.moveHistory[#snapshot.moveHistory]
-
-        if latest
-            and latest.from == move.from
-            and latest.to == move.to
-            and latest.capturedPiece == move.capturedPiece
-        then
-            moveColor = latest.color
-        end
-    end
+    local moveColor = crChessMoveColorFromSnapshot(snapshot, move)
 
     local playerCaptured = moveColor == localColor
     local kind = playerCaptured and 'capture' or 'captured'
@@ -381,11 +497,7 @@ local function showMoveFeedback(snapshot)
         and ('You captured %s on %s.'):format(capturedName, move.captureSquare or move.to)
         or ('You lost %s on %s.'):format(capturedName, move.captureSquare or move.to)
 
-    if playCaptureReactions then
-        playCaptureReactions(snapshot, move, moveColor)
-    end
-
-    playFeedbackSound(nativeKind)
+    playFeedbackSound(nativeKind, soundVolume)
     sendNui('feedback', {
         kind = kind,
         title = title,
@@ -403,6 +515,14 @@ local function finishTitle(result)
     end
 
     return 'Draw'
+end
+
+local function finishReasonText(reason)
+    if reason == 'timeout' then
+        return 'on time'
+    end
+
+    return reason
 end
 
 local function resultForSnapshot(snapshot)
@@ -442,7 +562,7 @@ local function showMatchResultFeedback(snapshot)
     feedback.resultOpen = true
     setNuiVisible(true, true)
 
-    local reason = snapshot.finishReason or (result == 'draw' and 'draw' or 'win')
+    local reason = finishReasonText(snapshot.finishReason or (result == 'draw' and 'draw' or 'win'))
     local subtitle = result == 'draw'
         and ('Game drawn by %s.'):format(reason)
         or (result == 'win'
@@ -457,9 +577,17 @@ local function showMatchResultFeedback(snapshot)
     })
 end
 
-local function handleMoveLandingFeedback(snapshot)
-    playMoveSound()
-    showMoveFeedback(snapshot)
+local function handleMoveLandingFeedback(snapshot, rendered)
+    local soundVolume = soundDistanceVolume(rendered)
+
+    playMoveSound(soundVolume)
+
+    if playCaptureReactions then
+        local move = snapshot and snapshot.lastMove or nil
+        playCaptureReactions(snapshot, move, crChessMoveColorFromSnapshot(snapshot, move))
+    end
+
+    showMoveFeedback(snapshot, soundVolume)
 end
 
 local function toVector3(coords)
@@ -585,9 +713,9 @@ local function attachEntityToBoardOffset(entity, boardEntity, offset)
         offset.x,
         offset.y,
         offset.z,
-        0.0,
-        0.0,
-        offset.heading or 0.0,
+        offset.rotX or 0.0,
+        offset.rotY or 0.0,
+        offset.rotZ or offset.heading or 0.0,
         false,
         false,
         false,
@@ -700,6 +828,172 @@ local function moveRenderedPiece(rendered, from, to, pieceCode)
     return true
 end
 
+function crChessPieceColorSide(pieceCode)
+    if not pieceCode then
+        return nil
+    end
+
+    return pieceCode:sub(1, 1) == 'w' and 'white' or 'black'
+end
+
+function crChessCapturedConfig(side)
+    local config = Config.CapturedPieces and Config.CapturedPieces[side] or nil
+
+    if config then
+        return config
+    end
+
+    local step = Config.PieceOffset and Config.PieceOffset.step or 0.06
+
+    return {
+        offset = { x = side == 'white' and -0.21 or 0.21, y = side == 'white' and -0.33 or 0.33, z = 0.01 },
+        headingOffset = side == 'white' and 0.0 or 180.0,
+        rotation = { x = 0.0, y = 0.0, z = 0.0 },
+        rowSize = 8,
+        columnStep = { x = side == 'white' and step or -step, y = 0.0, z = 0.0 },
+        rowStep = { x = 0.0, y = side == 'white' and -step or step, z = 0.0 }
+    }
+end
+
+function crChessRotateLocalVector(vector, rotation)
+    rotation = rotation or {}
+
+    local x = vector.x or 0.0
+    local y = vector.y or 0.0
+    local z = vector.z or 0.0
+    local rx = math.rad(rotation.x or 0.0)
+    local ry = math.rad(rotation.y or 0.0)
+    local rz = math.rad(rotation.z or 0.0)
+
+    local cosX = math.cos(rx)
+    local sinX = math.sin(rx)
+    local y1 = y * cosX - z * sinX
+    local z1 = y * sinX + z * cosX
+
+    y = y1
+    z = z1
+
+    local cosY = math.cos(ry)
+    local sinY = math.sin(ry)
+    local x1 = x * cosY + z * sinY
+    local z2 = -x * sinY + z * cosY
+
+    x = x1
+    z = z2
+
+    local cosZ = math.cos(rz)
+    local sinZ = math.sin(rz)
+    local x2 = x * cosZ - y * sinZ
+    local y2 = x * sinZ + y * cosZ
+
+    return {
+        x = x2,
+        y = y2,
+        z = z
+    }
+end
+
+function crChessCapturedOffset(side, index)
+    local config = crChessCapturedConfig(side)
+    local origin = config.offset or { x = 0.0, y = 0.0, z = Config.PieceOffset and Config.PieceOffset.z or 0.002 }
+    local columnStep = config.columnStep or { x = Config.PieceOffset.step or 0.06, y = 0.0, z = 0.0 }
+    local rowStep = config.rowStep or { x = 0.0, y = Config.PieceOffset.step or 0.06, z = 0.0 }
+    local rotation = config.rotation or { x = 0.0, y = 0.0, z = 0.0 }
+    local rowSize = math.max(1, tonumber(config.rowSize) or 8)
+    local zeroIndex = math.max(0, (tonumber(index) or 1) - 1)
+    local column = zeroIndex % rowSize
+    local row = math.floor(zeroIndex / rowSize)
+    local localOffset = crChessRotateLocalVector({
+        x = (columnStep.x or 0.0) * column + (rowStep.x or 0.0) * row,
+        y = (columnStep.y or 0.0) * column + (rowStep.y or 0.0) * row,
+        z = (columnStep.z or 0.0) * column + (rowStep.z or 0.0) * row
+    }, rotation)
+
+    return {
+        x = (origin.x or 0.0) + localOffset.x,
+        y = (origin.y or 0.0) + localOffset.y,
+        z = (origin.z or 0.0) + localOffset.z,
+        rotX = rotation.x or 0.0,
+        rotY = rotation.y or 0.0,
+        rotZ = (config.headingOffset or 0.0) + (rotation.z or 0.0)
+    }
+end
+
+function crChessNormalizeDegrees(value)
+    value = tonumber(value) or 0.0
+    value = value % 360.0
+
+    if value > 180.0 then
+        value = value - 360.0
+    end
+
+    return value
+end
+
+function crChessVectorAngleDegrees(vector)
+    return math.deg(math.atan(vector.y or 0.0, vector.x or 0.0))
+end
+
+function crChessSetCapturedDirection(side, direction)
+    local config = crChessCapturedConfig(side)
+    local rotation = config.rotation or { x = 0.0, y = 0.0, z = 0.0 }
+    local columnStep = config.columnStep or { x = Config.PieceOffset.step or 0.06, y = 0.0, z = 0.0 }
+    local desired = nil
+    local directionText = tostring(direction or ''):lower()
+
+    if directionText == 'east' or directionText == 'e' then
+        desired = 0.0
+    elseif directionText == 'north' or directionText == 'n' then
+        desired = 90.0
+    elseif directionText == 'west' or directionText == 'w' then
+        desired = 180.0
+    elseif directionText == 'south' or directionText == 's' then
+        desired = -90.0
+    elseif directionText == 'flip' or directionText == 'opposite' then
+        desired = (rotation.z or 0.0) + 180.0 + crChessVectorAngleDegrees(columnStep)
+    elseif directionText == 'left' or directionText == 'ccw' then
+        desired = (rotation.z or 0.0) + 90.0 + crChessVectorAngleDegrees(columnStep)
+    elseif directionText == 'right' or directionText == 'cw' then
+        desired = (rotation.z or 0.0) - 90.0 + crChessVectorAngleDegrees(columnStep)
+    else
+        desired = tonumber(direction)
+    end
+
+    if not desired then
+        return false
+    end
+
+    config.rotation = rotation
+    config.rotation.z = crChessNormalizeDegrees(desired - crChessVectorAngleDegrees(columnStep))
+
+    return true
+end
+
+function crChessSpawnCapturedPiece(rendered, side, pieceCode, index)
+    local model = Config.Props.pieces[pieceCode]
+
+    if not model or not rendered or not rendered.board then
+        return nil
+    end
+
+    local coords = GetEntityCoords(rendered.board)
+    local piece = createObject(model, {
+        x = coords.x,
+        y = coords.y,
+        z = coords.z + 0.5
+    })
+
+    if not piece then
+        return nil
+    end
+
+    SetEntityCollision(piece, false, false)
+    SetEntityVisible(piece, true, false)
+    attachEntityToBoardOffset(piece, rendered.board, crChessCapturedOffset(side, index))
+
+    return piece
+end
+
 local function clearCapturedSide(rendered, side)
     local entries = rendered.captured[side]
 
@@ -710,19 +1004,228 @@ local function clearCapturedSide(rendered, side)
     rendered.captured[side] = {}
 end
 
-local function reconcileCaptured(rendered)
-    rendered.capturedWhiteCodes = {}
-    rendered.capturedBlackCodes = {}
-    clearCapturedSide(rendered, 'white')
-    clearCapturedSide(rendered, 'black')
+function crChessSyncCapturedSide(rendered, side, codes)
+    codes = codes or {}
+
+    local oldEntries = rendered.captured[side] or {}
+    local nextEntries = {}
+
+    for index, pieceCode in ipairs(codes) do
+        local entry = oldEntries[index]
+
+        if not entry or entry.code ~= pieceCode or not entry.entity or not DoesEntityExist(entry.entity) then
+            if entry then
+                deleteEntity(entry.entity)
+            end
+
+            entry = {
+                code = pieceCode,
+                entity = crChessSpawnCapturedPiece(rendered, side, pieceCode, index)
+            }
+        end
+
+        if entry.entity and DoesEntityExist(entry.entity) then
+            SetEntityCollision(entry.entity, false, false)
+            SetEntityVisible(entry.entity, true, false)
+
+            if entry.movingUntil and GetGameTimer() < entry.movingUntil then
+                -- The capture animation is already carrying this prop to its slot.
+            elseif entry.index ~= index then
+                animateEntityToOffset(rendered, entry.entity, crChessCapturedOffset(side, index), 420, 0.08)
+            else
+                attachEntityToBoardOffset(entry.entity, rendered.board, crChessCapturedOffset(side, index))
+            end
+        end
+
+        entry.index = index
+        nextEntries[index] = entry
+    end
+
+    for index = #codes + 1, #oldEntries do
+        deleteEntity(oldEntries[index] and oldEntries[index].entity)
+    end
+
+    rendered.captured[side] = nextEntries
 end
 
-local function removeCapturedPiece(entity)
-    if not entity then
+local function reconcileCaptured(rendered, capturedWhite, capturedBlack)
+    rendered.capturedWhiteCodes = capturedWhite or {}
+    rendered.capturedBlackCodes = capturedBlack or {}
+    crChessSyncCapturedSide(rendered, 'white', capturedWhite or {})
+    crChessSyncCapturedSide(rendered, 'black', capturedBlack or {})
+end
+
+function crChessRefreshCapturedPositions(rendered)
+    if not rendered then
         return
     end
 
-    deleteEntity(entity)
+    for _, side in ipairs({ 'white', 'black' }) do
+        for index, entry in ipairs(rendered.captured[side] or {}) do
+            if entry.entity and DoesEntityExist(entry.entity) then
+                attachEntityToBoardOffset(entry.entity, rendered.board, crChessCapturedOffset(side, index))
+            end
+        end
+    end
+end
+
+function crChessCollectCapturedPiece(rendered, pieceCode, entity, snapshot)
+    if not rendered or not pieceCode or not entity or not DoesEntityExist(entity) then
+        return
+    end
+
+    local side = crChessPieceColorSide(pieceCode)
+    local codes = side == 'white' and snapshot and snapshot.capturedWhite or snapshot and snapshot.capturedBlack
+    local index = codes and #codes or ((rendered.captured[side] and #rendered.captured[side] or 0) + 1)
+
+    if index <= 0 then
+        index = (rendered.captured[side] and #rendered.captured[side] or 0) + 1
+    end
+
+    SetEntityCollision(entity, false, false)
+    SetEntityVisible(entity, true, false)
+    rendered.captured[side] = rendered.captured[side] or {}
+    rendered.captured[side][index] = {
+        code = pieceCode,
+        entity = entity,
+        index = index,
+        movingUntil = GetGameTimer() + 540
+    }
+    animateEntityToOffset(rendered, entity, crChessCapturedOffset(side, index), 520, 0.10)
+end
+
+function crChessBoardPieceCount(board)
+    local count = 0
+
+    for _ in pairs(board or {}) do
+        count = count + 1
+    end
+
+    return count
+end
+
+function crChessIsStartingBoard(board)
+    if crChessBoardPieceCount(board) ~= 32 then
+        return false
+    end
+
+    return board.a1 == 'wR' and board.b1 == 'wN' and board.c1 == 'wB' and board.d1 == 'wQ'
+        and board.e1 == 'wK' and board.f1 == 'wB' and board.g1 == 'wN' and board.h1 == 'wR'
+        and board.a8 == 'bR' and board.b8 == 'bN' and board.c8 == 'bB' and board.d8 == 'bQ'
+        and board.e8 == 'bK' and board.f8 == 'bB' and board.g8 == 'bN' and board.h8 == 'bR'
+        and board.a2 == 'wP' and board.b2 == 'wP' and board.c2 == 'wP' and board.d2 == 'wP'
+        and board.e2 == 'wP' and board.f2 == 'wP' and board.g2 == 'wP' and board.h2 == 'wP'
+        and board.a7 == 'bP' and board.b7 == 'bP' and board.c7 == 'bP' and board.d7 == 'bP'
+        and board.e7 == 'bP' and board.f7 == 'bP' and board.g7 == 'bP' and board.h7 == 'bP'
+end
+
+function crChessHasCapturedPieces(rendered)
+    return rendered
+        and ((rendered.captured.white and #rendered.captured.white > 0)
+            or (rendered.captured.black and #rendered.captured.black > 0))
+end
+
+function crChessQueueResetEntity(queues, pieceCode, entity)
+    if not pieceCode or not entity or not DoesEntityExist(entity) then
+        deleteEntity(entity)
+        return
+    end
+
+    queues[pieceCode] = queues[pieceCode] or {}
+    queues[pieceCode][#queues[pieceCode] + 1] = entity
+end
+
+function crChessPopResetEntity(queues, pieceCode)
+    local queue = queues[pieceCode]
+
+    if not queue or #queue == 0 then
+        return nil
+    end
+
+    return table.remove(queue, 1)
+end
+
+function crChessShouldAnimateBoardReset(rendered, board, resetKey)
+    if not rendered or not board or rendered.resetBoardKey == resetKey then
+        return false
+    end
+
+    if not crChessIsStartingBoard(board) then
+        return false
+    end
+
+    return crChessHasCapturedPieces(rendered) or not crChessIsStartingBoard(rendered.pieceCodes or {})
+end
+
+function crChessAnimateBoardReset(rendered, board, resetKey)
+    if not rendered or not board then
+        return false
+    end
+
+    rendered.resetBoardKey = resetKey
+
+    local queues = {}
+
+    for square, entity in pairs(rendered.pieces or {}) do
+        crChessQueueResetEntity(queues, rendered.pieceCodes[square], entity)
+    end
+
+    for _, side in ipairs({ 'white', 'black' }) do
+        for _, entry in ipairs(rendered.captured[side] or {}) do
+            crChessQueueResetEntity(queues, entry.code, entry.entity)
+        end
+    end
+
+    rendered.pieces = {}
+    rendered.pieceCodes = {}
+    rendered.captured = {
+        white = {},
+        black = {}
+    }
+    rendered.capturedWhiteCodes = {}
+    rendered.capturedBlackCodes = {}
+
+    local order = {}
+
+    for rank = 1, 8 do
+        for _, file in ipairs(files) do
+            local square = file .. tostring(rank)
+
+            if board[square] then
+                order[#order + 1] = square
+            end
+        end
+    end
+
+    for index, square in ipairs(order) do
+        local pieceCode = board[square]
+        local entity = crChessPopResetEntity(queues, pieceCode)
+
+        if entity and DoesEntityExist(entity) then
+            SetEntityCollision(entity, false, false)
+            SetEntityVisible(entity, true, false)
+            rendered.pieces[square] = entity
+            rendered.pieceCodes[square] = pieceCode
+
+            CreateThread(function()
+                Wait((index - 1) * 22)
+
+                if entity and DoesEntityExist(entity) then
+                    animateEntityToOffset(rendered, entity, squareOffset(square), 680, 0.12)
+                end
+            end)
+        else
+            spawnPiece(rendered, pieceCode, square)
+        end
+    end
+
+    for _, queue in pairs(queues) do
+        for _, entity in ipairs(queue) do
+            deleteEntity(entity)
+        end
+    end
+
+    return true
 end
 
 local function reconcilePieces(rendered, board)
@@ -788,7 +1291,12 @@ local function applyLastMove(rendered, snapshot)
         local capturedEntity = rendered.pieces[capturedSquare]
         rendered.pieces[capturedSquare] = nil
         rendered.pieceCodes[capturedSquare] = nil
-        removeCapturedPiece(capturedEntity)
+
+        if capturedEntity and lastMove.capturedPiece then
+            crChessCollectCapturedPiece(rendered, lastMove.capturedPiece, capturedEntity, snapshot)
+        else
+            deleteEntity(capturedEntity)
+        end
     end
 
     if lastMove.castle and lastMove.rookFrom and lastMove.rookTo then
@@ -805,10 +1313,16 @@ local function applyLastMove(rendered, snapshot)
 
         local didAnimateActor = playActorMoveAnimation and playActorMoveAnimation(rendered, snapshot, lastMove)
         local delay = didAnimateActor and ((Config.Animations and Config.Animations.pieceMoveDelay) or 0) or 0
+        local moveDuration = 650
+
+        if spectator.active and spectator.matchId == snapshot.id then
+            spectator.followEntity = movingEntity
+            spectator.followUntil = GetGameTimer() + delay + moveDuration + ((Config.Spectator and Config.Spectator.moveFollowExtraMs) or 450)
+        end
 
         local function animateMove(done)
             local function run()
-                animateEntityToOffset(rendered, movingEntity, squareOffset(lastMove.to), 650, 0.16, done)
+                animateEntityToOffset(rendered, movingEntity, squareOffset(lastMove.to), moveDuration, 0.16, done)
             end
 
             if delay > 0 then
@@ -823,7 +1337,7 @@ local function applyLastMove(rendered, snapshot)
 
         if lastMove.promotion then
             animateMove(function()
-                handleMoveLandingFeedback(snapshot)
+                handleMoveLandingFeedback(snapshot, rendered)
 
                 if rendered.pieces[lastMove.to] == movingEntity then
                     deleteEntity(movingEntity)
@@ -834,7 +1348,7 @@ local function applyLastMove(rendered, snapshot)
             end)
         else
             animateMove(function()
-                handleMoveLandingFeedback(snapshot)
+                handleMoveLandingFeedback(snapshot, rendered)
             end)
         end
     end
@@ -874,6 +1388,10 @@ local function cleanupTable(tableId)
         return
     end
 
+    if crChessDestroyAmbientDui then
+        crChessDestroyAmbientDui(tableId)
+    end
+
     unregisterTableTargets(rendered)
 
     if clearSeatAvatars then
@@ -900,7 +1418,7 @@ local function cleanupTable(tableId)
         deleteEntity(chair)
     end
 
-    deleteEntity(rendered.botPed)
+    clearBotPed(rendered)
     deleteEntity(rendered.board)
     deleteEntity(rendered.table)
     renderedTables[tableId] = nil
@@ -917,9 +1435,18 @@ local function renderTable(tableData)
         then
             cleanupTable(tableData.id)
         else
+            local resetKey = tableData.matchId and ('table:' .. tostring(tableData.matchId)) or nil
+            local didReset = resetKey and crChessShouldAnimateBoardReset(rendered, tableData.board, resetKey)
+
             rendered.snapshot = tableData
-            reconcilePieces(rendered, tableData.board)
-            reconcileCaptured(rendered, tableData.capturedWhite, tableData.capturedBlack)
+
+            if didReset then
+                crChessAnimateBoardReset(rendered, tableData.board, resetKey)
+            else
+                reconcilePieces(rendered, tableData.board)
+                reconcileCaptured(rendered, tableData.capturedWhite, tableData.capturedBlack)
+            end
+
             reconcileSeatAvatars(rendered, tableData)
             registerTableTargets(tableData.id, rendered)
 
@@ -992,7 +1519,10 @@ local function renderTable(tableData)
         capturedWhiteCodes = {},
         capturedBlackCodes = {},
         botPed = nil,
+        botPeds = {},
         seatAvatars = {},
+        matchId = tableData.matchId,
+        resetBoardKey = nil,
         lastMoveKey = nil,
         snapshot = tableData,
         targetSystem = nil
@@ -1354,6 +1884,32 @@ local function cameraConfigForColor(color)
     }
 end
 
+function crChessTopDownCameraConfigForColor(color)
+    local cameras = Config.Camera or {}
+    local topDown = cameras.topDown or {}
+    local camera = topDown[color or 'white'] or topDown.white or topDown.black
+
+    if camera and camera.offset and camera.lookAt then
+        return camera
+    end
+
+    local yOffset = color == 'black' and 0.02 or -0.02
+
+    return {
+        offset = { x = 0.0, y = yOffset, z = 0.9 },
+        lookAt = { x = 0.0, y = 0.0, z = 0.02 },
+        fov = 42.0
+    }
+end
+
+function crChessCameraConfigForCurrentMode(color)
+    if interaction.cameraMode == 'top' or interaction.cameraMode == 'topdown' then
+        return crChessTopDownCameraConfigForColor(color)
+    end
+
+    return cameraConfigForColor(color)
+end
+
 local function stopTableCamera()
     if tableCamera then
         RenderScriptCams(false, true, 350, true, true)
@@ -1369,7 +1925,7 @@ local function startTableCamera(rendered)
 
     stopTableCamera()
 
-    local cameraConfig = cameraConfigForColor(localPerspective())
+    local cameraConfig = crChessCameraConfigForCurrentMode(localPerspective())
     local camCoords = GetOffsetFromEntityInWorldCoords(
         rendered.board,
         cameraConfig.offset.x,
@@ -1391,7 +1947,690 @@ local function startTableCamera(rendered)
     RenderScriptCams(true, true, 350, true, true)
 end
 
-local function sendSnapshotToNui(snapshot)
+function stopSpectatorMode(hideUi)
+    if spectator.camera then
+        RenderScriptCams(false, true, 350, true, true)
+        DestroyCam(spectator.camera, false)
+    end
+
+    if destroySpectatorDui then
+        destroySpectatorDui()
+    end
+
+    spectator.active = false
+    spectator.matchId = nil
+    spectator.tableId = nil
+    spectator.camera = nil
+    spectator.focus = nil
+    spectator.camCoords = nil
+    spectator.followEntity = nil
+    spectator.followUntil = 0
+    spectator.focusSquare = nil
+    spectator.focusUntil = 0
+    spectator.snapshot = nil
+
+    if hideUi ~= false and not currentMatch then
+        setNuiVisible(false)
+    end
+
+    sendNui('boardOverlay', { visible = false })
+end
+
+function boardCenterCoords(rendered, zOffset)
+    local config = Config.PieceOffset
+    local centerX = config.startX + config.step * 3.5
+    local centerY = config.startY + config.step * 3.5
+
+    return GetOffsetFromEntityInWorldCoords(rendered.board, centerX, centerY, (config.z or 0.002) + (zOffset or 0.0))
+end
+
+function spectatorDuiConfig()
+    return Config.SpectatorDui or {}
+end
+
+function spectatorDuiEnabled()
+    local config = spectatorDuiConfig()
+    return config.enabled ~= false
+end
+
+function crChessSpectatorDuiAmbientEnabled()
+    local config = spectatorDuiConfig()
+    return spectatorDuiEnabled() and config.ambient ~= false
+end
+
+function spectatorDuiUrl()
+    return ('https://cfx-nui-%s/html/spectator.html'):format(GetCurrentResourceName())
+end
+
+function ensureDuiState(duiState)
+    if not spectatorDuiEnabled() then
+        return false
+    end
+
+    if not duiState then
+        return false
+    end
+
+    if duiState.dui then
+        return true
+    end
+
+    local config = spectatorDuiConfig()
+    local width = math.max(256, math.floor(tonumber(config.width) or 768))
+    local height = math.max(192, math.floor(tonumber(config.height) or 512))
+
+    duiState.dui = CreateDui(spectatorDuiUrl(), width, height)
+    duiState.txd = CreateRuntimeTxd(duiState.txdName or 'cr_chess_spectator_dui')
+    local duiHandle = GetDuiHandle(duiState.dui)
+    duiState.txn = CreateRuntimeTextureFromDuiHandle(duiState.txd, duiState.txnName or 'overlay', duiHandle)
+    duiState.lastKey = nil
+    duiState.readyAt = GetGameTimer() + 350
+
+    return true
+end
+
+function destroyDuiState(duiState)
+    if duiState.dui then
+        SendDuiMessage(duiState.dui, json.encode({ action = 'hide' }))
+        DestroyDui(duiState.dui)
+    end
+
+    duiState.dui = nil
+    duiState.txd = nil
+    duiState.txn = nil
+    duiState.lastKey = nil
+    duiState.readyAt = nil
+end
+
+function ensureSpectatorDui()
+    return ensureDuiState(spectator.dui)
+end
+
+destroySpectatorDui = function()
+    destroyDuiState(spectator.dui)
+end
+
+function crChessDuiSnapshotKey(snapshot)
+    if not snapshot then
+        return nil
+    end
+
+    local move = snapshot.lastMove or {}
+    local bets = snapshot.spectatorBets or {}
+    local clock = snapshot.clock or {}
+    local remaining = clock.remaining or {}
+
+    return table.concat({
+        tostring(snapshot.id or ''),
+        tostring(snapshot.label or ''),
+        tostring(snapshot.mode or ''),
+        tostring(snapshot.state or ''),
+        tostring(snapshot.turn or ''),
+        tostring(snapshot.fen or ''),
+        tostring(move.from or ''),
+        tostring(move.to or ''),
+        tostring(move.piece or ''),
+        tostring(move.finalPiece or ''),
+        tostring(move.capturedPiece or ''),
+        tostring(snapshot.winner or ''),
+        tostring(snapshot.result or ''),
+        tostring(snapshot.finishReason or ''),
+        tostring(bets.enabled or false),
+        tostring(bets.open or false),
+        tostring(bets.total or 0),
+        tostring(bets.secondsRemaining or ''),
+        tostring(clock.activeColor or ''),
+        tostring(remaining.white or ''),
+        tostring(remaining.black or '')
+    }, '|')
+end
+
+function sendDuiSnapshotToState(duiState, snapshot, force)
+    if not snapshot or not ensureDuiState(duiState) then
+        return
+    end
+
+    local config = spectatorDuiConfig()
+    local key = crChessDuiSnapshotKey(snapshot)
+    local warmingUp = duiState.readyAt and GetGameTimer() < duiState.readyAt
+
+    if not force and not warmingUp and key and duiState.lastKey == key then
+        return
+    end
+
+    duiState.lastKey = warmingUp and nil or key
+
+    SendDuiMessage(duiState.dui, json.encode({
+        action = 'snapshot',
+        snapshot = snapshot,
+        perspective = config.perspective or 'white'
+    }))
+end
+
+sendSpectatorDuiSnapshot = function(snapshot, force)
+    sendDuiSnapshotToState(spectator.dui, snapshot, force)
+end
+
+function crChessDuiDistanceLayout(config, boardCoords)
+    local offset = config.offset or {}
+    local width = tonumber(config.screenWidth) or 0.245
+    local height = tonumber(config.screenHeight) or 0.165
+    local alpha = tonumber(config.alpha) or 242
+    local z = tonumber(offset.z) or 0.52
+    local scale = config.distanceScale or {}
+
+    if scale.enabled == false or not boardCoords then
+        return width, height, z, math.floor(alpha)
+    end
+
+    local playerCoords = GetEntityCoords(PlayerPedId())
+    local dx = playerCoords.x - boardCoords.x
+    local dy = playerCoords.y - boardCoords.y
+    local dz = playerCoords.z - boardCoords.z
+    local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+    local nearDistance = tonumber(scale.nearDistance) or 2.0
+    local farDistance = tonumber(scale.farDistance) or (tonumber(config.drawDistance) or 8.0)
+
+    if farDistance <= nearDistance then
+        farDistance = nearDistance + 0.01
+    end
+
+    local t = math.max(0.0, math.min(1.0, (distance - nearDistance) / (farDistance - nearDistance)))
+
+    local function mix(nearValue, farValue, fallbackNear, fallbackFar)
+        nearValue = tonumber(nearValue) or fallbackNear
+        farValue = tonumber(farValue) or fallbackFar
+
+        return nearValue + (farValue - nearValue) * t
+    end
+
+    width = mix(scale.nearScreenWidth, scale.farScreenWidth, width, width * 0.55)
+    height = mix(scale.nearScreenHeight, scale.farScreenHeight, height, height * 0.55)
+    z = mix(scale.nearOffsetZ, scale.farOffsetZ, z, z + 0.55)
+    alpha = mix(scale.nearAlpha, scale.farAlpha, alpha, alpha * 0.86)
+
+    return width, height, z, math.floor(math.max(0, math.min(255, alpha)))
+end
+
+function drawDuiState(rendered, snapshot, duiState)
+    snapshot = snapshot or spectator.snapshot
+
+    if not snapshot or not rendered or not rendered.board or not spectatorDuiEnabled() then
+        return
+    end
+
+    sendDuiSnapshotToState(duiState, snapshot)
+
+    if not ensureDuiState(duiState) then
+        return
+    end
+
+    local config = spectatorDuiConfig()
+    local offset = config.offset or {}
+    local boardCoords = GetEntityCoords(rendered.board)
+    local width, height, z, alpha = crChessDuiDistanceLayout(config, boardCoords)
+    local coords = GetOffsetFromEntityInWorldCoords(
+        rendered.board,
+        tonumber(offset.x) or 0.0,
+        tonumber(offset.y) or 0.0,
+        z
+    )
+    local onScreen = World3dToScreen2d(coords.x, coords.y, coords.z)
+
+    if not onScreen then
+        return
+    end
+
+    SetDrawOrigin(coords.x, coords.y, coords.z, 0)
+    DrawSprite(
+        duiState.txdName or spectator.dui.txdName,
+        duiState.txnName or spectator.dui.txnName,
+        0.0,
+        0.0,
+        width,
+        height,
+        0.0,
+        255,
+        255,
+        255,
+        alpha
+    )
+    ClearDrawOrigin()
+end
+
+drawSpectatorDui = function(rendered, snapshot)
+    drawDuiState(rendered, snapshot, spectator.dui)
+end
+
+function crChessAmbientDuiState(tableId)
+    tableId = tonumber(tableId)
+
+    if not tableId then
+        return nil
+    end
+
+    spectator.dui.ambient = spectator.dui.ambient or {}
+
+    if not spectator.dui.ambient[tableId] then
+        spectator.dui.ambient[tableId] = {
+            dui = nil,
+            txd = nil,
+            txn = nil,
+            txdName = ('cr_chess_spectator_dui_%s'):format(tableId),
+            txnName = 'overlay',
+            lastKey = nil
+        }
+    end
+
+    return spectator.dui.ambient[tableId]
+end
+
+crChessDestroyAmbientDui = function(tableId)
+    tableId = tonumber(tableId)
+
+    if not tableId or not spectator.dui.ambient or not spectator.dui.ambient[tableId] then
+        return
+    end
+
+    destroyDuiState(spectator.dui.ambient[tableId])
+    spectator.dui.ambient[tableId] = nil
+end
+
+function crChessDestroyStaleAmbientDuis(activeTableIds)
+    if not spectator.dui.ambient then
+        return
+    end
+
+    for tableId in pairs(spectator.dui.ambient) do
+        if not activeTableIds or not activeTableIds[tableId] then
+            crChessDestroyAmbientDui(tableId)
+        end
+    end
+end
+
+function crChessDrawAmbientSpectatorDui(tableId, rendered, snapshot)
+    local duiState = crChessAmbientDuiState(tableId)
+
+    if duiState then
+        drawDuiState(rendered, snapshot, duiState)
+    end
+end
+
+function crChessSeatPlayerName(seat)
+    if type(seat) == 'table' then
+        return seat.name
+    end
+
+    return nil
+end
+
+function crChessIdleTableDuiSnapshot(tableId, rendered)
+    local config = spectatorDuiConfig()
+
+    if config.showIdleTables == false then
+        return nil
+    end
+
+    local tableData = rendered and rendered.snapshot or nil
+
+    if not tableData then
+        return nil
+    end
+
+    local seats = tableData.seats or {}
+    local whiteName = crChessSeatPlayerName(seats.white) or 'White open'
+    local blackName = crChessSeatPlayerName(seats.black) or 'Black open'
+
+    return {
+        id = tableId,
+        label = ('Table %s'):format(tableId),
+        mode = 'open',
+        state = 'idle',
+        tableId = tableId,
+        whiteName = whiteName,
+        blackName = blackName,
+        players = {
+            white = { name = whiteName, rankName = seats.white and 'Seated' or 'Open' },
+            black = { name = blackName, rankName = seats.black and 'Seated' or 'Open' }
+        },
+        board = tableData.board or {},
+        spectatorBets = { enabled = false },
+        clock = { enabled = false },
+        moveHistory = {},
+        capturedWhite = tableData.capturedWhite or {},
+        capturedBlack = tableData.capturedBlack or {}
+    }
+end
+
+function crChessTableDuiSnapshot(tableId, rendered)
+    local tableData = rendered and rendered.snapshot or nil
+    local matchId = tableData and tonumber(tableData.matchId) or nil
+
+    if matchId and observedMatches[matchId] then
+        return observedMatches[matchId]
+    end
+
+    return crChessIdleTableDuiSnapshot(tableId, rendered)
+end
+
+function crChessAmbientDuiTargets()
+    if not crChessSpectatorDuiAmbientEnabled() or spectator.active or currentMatch or seated.active then
+        return {}
+    end
+
+    local config = spectatorDuiConfig()
+    local range = tonumber(config.drawDistance) or 12.0
+    local playerCoords = GetEntityCoords(PlayerPedId())
+    local targets = {}
+
+    for tableId, rendered in pairs(renderedTables) do
+        if rendered.board and DoesEntityExist(rendered.board) then
+            local snapshot = crChessTableDuiSnapshot(tableId, rendered)
+
+            if snapshot then
+                local coords = GetEntityCoords(rendered.board)
+                local dx = playerCoords.x - coords.x
+                local dy = playerCoords.y - coords.y
+                local dz = playerCoords.z - coords.z
+                local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+                if distance <= range then
+                    targets[#targets + 1] = {
+                        tableId = tableId,
+                        rendered = rendered,
+                        snapshot = snapshot,
+                        distance = distance
+                    }
+                end
+            end
+        end
+    end
+
+    table.sort(targets, function(a, b)
+        return a.distance < b.distance
+    end)
+
+    local limit = math.max(1, math.floor(tonumber(config.maxAmbientDuis) or 4))
+
+    while #targets > limit do
+        targets[#targets] = nil
+    end
+
+    return targets
+end
+
+function crChessAmbientDuiTarget()
+    local targets = crChessAmbientDuiTargets()
+    local first = targets[1]
+
+    if not first then
+        return nil, nil, nil
+    end
+
+    return first.rendered, first.snapshot, first.tableId
+end
+
+function crChessMaybeSyncAmbientDui(snapshot)
+    if not snapshot or snapshot.state == 'idle' then
+        return
+    end
+
+    local interval = tonumber(spectatorDuiConfig().syncIntervalMs) or 5000
+    local now = GetGameTimer()
+
+    if now - (spectator.dui.lastAmbientSyncAt or 0) >= interval then
+        spectator.dui.lastAmbientSyncAt = now
+        TriggerServerEvent('cr-chess:server:requestSync')
+    end
+end
+
+function crChessMaybeRequestAttractMode(tableId, snapshot)
+    if not tableId or not snapshot then
+        return
+    end
+
+    local config = Config.AttractMode or {}
+
+    if config.enabled == false then
+        return
+    end
+
+    if snapshot.state ~= 'idle' and snapshot.demo ~= true then
+        return
+    end
+
+    local interval = tonumber(config.heartbeatIntervalMs) or 4000
+    local now = GetGameTimer()
+    local lastSeenByTable = spectator.dui.lastAttractSeenAt
+
+    if type(lastSeenByTable) ~= 'table' then
+        lastSeenByTable = {}
+        spectator.dui.lastAttractSeenAt = lastSeenByTable
+    end
+
+    if now - (lastSeenByTable[tableId] or 0) < interval then
+        return
+    end
+
+    lastSeenByTable[tableId] = now
+
+    local coords = GetEntityCoords(PlayerPedId())
+
+    TriggerServerEvent('cr-chess:server:attractTableSeen', tableId, {
+        x = coords.x,
+        y = coords.y,
+        z = coords.z
+    })
+end
+
+function spectatorFocusCoords(rendered)
+    local config = Config.Spectator or {}
+    local now = GetGameTimer()
+
+    if spectator.followEntity and now <= (spectator.followUntil or 0) and DoesEntityExist(spectator.followEntity) then
+        local coords = GetEntityCoords(spectator.followEntity)
+        return vector3(coords.x, coords.y, coords.z + (config.focusHeight or 0.08))
+    end
+
+    if spectator.focusSquare and now <= (spectator.focusUntil or 0) then
+        local offset = squareOffset(spectator.focusSquare)
+
+        if offset then
+            return GetOffsetFromEntityInWorldCoords(
+                rendered.board,
+                offset.x,
+                offset.y,
+                offset.z + (config.focusHeight or 0.08)
+            )
+        end
+    end
+
+    return boardCenterCoords(rendered, config.focusHeight or 0.08)
+end
+
+function updateSpectatorFocus(snapshot)
+    if not snapshot or not snapshot.lastMove then
+        return
+    end
+
+    spectator.focusSquare = snapshot.lastMove.to
+    spectator.focusUntil = GetGameTimer() + ((Config.Spectator and Config.Spectator.lastMoveFocusMs) or 1800)
+end
+
+function clampValue(value, minValue, maxValue)
+    return math.max(minValue, math.min(maxValue, value))
+end
+
+function lerpNumber(current, target, alpha)
+    return current + (target - current) * alpha
+end
+
+function lerpCoords(current, target, alpha)
+    if not current then
+        return target
+    end
+
+    return vector3(
+        lerpNumber(current.x, target.x, alpha),
+        lerpNumber(current.y, target.y, alpha),
+        lerpNumber(current.z, target.z, alpha)
+    )
+end
+
+function lerpAlpha(speed, delta)
+    return 1.0 - math.exp(-(speed or 8.0) * math.max(0.0, delta or 0.0))
+end
+
+function spectatorYawFromPlayer(rendered)
+    local playerCoords = GetEntityCoords(PlayerPedId())
+    local localPoint = GetOffsetFromEntityGivenWorldCoords(rendered.board, playerCoords.x, playerCoords.y, playerCoords.z)
+
+    if math.abs(localPoint.x) < 0.001 and math.abs(localPoint.y) < 0.001 then
+        return 180.0
+    end
+
+    return math.deg(math.atan(localPoint.x, localPoint.y))
+end
+
+function startSpectatorMode(snapshot)
+    if not snapshot or not snapshot.tableId then
+        notify('No spectatable chess match found.')
+        return
+    end
+
+    local rendered = renderedTables[snapshot.tableId]
+
+    if not rendered or not rendered.board or not DoesEntityExist(rendered.board) then
+        notify('That match table is not rendered yet. Try again in a moment.')
+        TriggerServerEvent('cr-chess:server:requestSync')
+        return
+    end
+
+    if reconcileSeatAvatars then
+        reconcileSeatAvatars(rendered, crChessSeatSnapshotFromMatch(snapshot))
+    end
+
+    stopSpectatorMode(false)
+    stopTableCamera()
+
+    spectator.active = true
+    spectator.matchId = snapshot.id
+    spectator.tableId = snapshot.tableId
+    spectator.snapshot = snapshot
+    spectator.yaw = spectatorYawFromPlayer(rendered)
+    spectator.radius = (Config.Spectator and Config.Spectator.radius) or 0.95
+    spectator.height = (Config.Spectator and Config.Spectator.height) or 0.72
+    spectator.lastUpdate = GetGameTimer()
+    updateSpectatorFocus(snapshot)
+
+    local config = Config.Spectator or {}
+    local focus = spectatorFocusCoords(rendered)
+    local yaw = math.rad(spectator.yaw)
+    local camCoords = GetOffsetFromEntityInWorldCoords(
+        rendered.board,
+        math.sin(yaw) * spectator.radius,
+        math.cos(yaw) * spectator.radius,
+        spectator.height
+    )
+
+    spectator.focus = focus
+    spectator.camCoords = camCoords
+
+    spectator.camera = CreateCam('DEFAULT_SCRIPTED_CAMERA', true)
+    SetCamCoord(spectator.camera, camCoords.x, camCoords.y, camCoords.z)
+    PointCamAtCoord(spectator.camera, focus.x, focus.y, focus.z)
+    SetCamFov(spectator.camera, config.fov or 55.0)
+    SetCamActive(spectator.camera, true)
+    RenderScriptCams(true, true, 350, true, true)
+
+    if spectatorDuiEnabled() and (spectatorDuiConfig().hideSidePanel ~= false) then
+        setNuiVisible(false, false)
+        sendSpectatorDuiSnapshot(snapshot)
+    else
+        setNuiVisible(true, false)
+        sendSnapshotToNui(snapshot)
+    end
+
+    ensureBotPedForMatch(snapshot)
+    notify(('Spectating match %d. Mouse moves camera, wheel zooms, Backspace exits.'):format(snapshot.id))
+end
+
+function updateSpectatorControls(delta)
+    local config = Config.Spectator or {}
+    local lookX = GetDisabledControlNormal(0, 1)
+    local lookY = GetDisabledControlNormal(0, 2)
+    local mouseSensitivity = config.mouseSensitivity or 135.0
+    local verticalSensitivity = config.verticalSensitivity or 0.55
+
+    spectator.yaw = (spectator.yaw - lookX * mouseSensitivity * math.max(delta, 0.0)) % 360.0
+    spectator.height = clampValue(
+        (spectator.height or config.height or 0.72) + lookY * verticalSensitivity * math.max(delta, 0.0),
+        config.minHeight or 0.35,
+        config.maxHeight or 1.15
+    )
+
+    if IsDisabledControlJustPressed(0, 241) or IsControlJustPressed(0, 241) then
+        spectator.radius = clampValue(
+            (spectator.radius or config.radius or 0.95) - (config.zoomStep or 0.08),
+            config.minRadius or 0.55,
+            config.maxRadius or 1.65
+        )
+    elseif IsDisabledControlJustPressed(0, 242) or IsControlJustPressed(0, 242) then
+        spectator.radius = clampValue(
+            (spectator.radius or config.radius or 0.95) + (config.zoomStep or 0.08),
+            config.minRadius or 0.55,
+            config.maxRadius or 1.65
+        )
+    end
+end
+
+function updateSpectatorCamera()
+    if not spectator.active then
+        return
+    end
+
+    local rendered = spectator.tableId and renderedTables[spectator.tableId] or nil
+
+    if not rendered or not rendered.board or not DoesEntityExist(rendered.board) then
+        stopSpectatorMode()
+        notify('Spectator mode stopped: table disappeared.')
+        return
+    end
+
+    if not spectator.camera then
+        spectator.camera = CreateCam('DEFAULT_SCRIPTED_CAMERA', true)
+        SetCamActive(spectator.camera, true)
+        RenderScriptCams(true, true, 350, true, true)
+    end
+
+    local now = GetGameTimer()
+    local delta = math.max(0, now - (spectator.lastUpdate or now)) / 1000.0
+    local config = Config.Spectator or {}
+
+    spectator.lastUpdate = now
+    updateSpectatorControls(delta)
+
+    local radians = math.rad(spectator.yaw or 180.0)
+    local radius = spectator.radius or config.radius or 0.95
+    local targetCamCoords = GetOffsetFromEntityInWorldCoords(
+        rendered.board,
+        math.sin(radians) * radius,
+        math.cos(radians) * radius,
+        spectator.height or config.height or 0.72
+    )
+    local targetFocus = spectatorFocusCoords(rendered)
+    local focusAlpha = lerpAlpha(config.focusLerp or 7.5, delta)
+    local cameraAlpha = lerpAlpha(config.cameraLerp or 12.0, delta)
+
+    spectator.focus = lerpCoords(spectator.focus, targetFocus, focusAlpha)
+    spectator.camCoords = lerpCoords(spectator.camCoords, targetCamCoords, cameraAlpha)
+
+    SetCamCoord(spectator.camera, spectator.camCoords.x, spectator.camCoords.y, spectator.camCoords.z)
+    PointCamAtCoord(spectator.camera, spectator.focus.x, spectator.focus.y, spectator.focus.z)
+    SetCamFov(spectator.camera, config.fov or 55.0)
+end
+
+sendSnapshotToNui = function(snapshot)
     sendNui('snapshot', {
         snapshot = snapshot,
         perspective = localColorForSnapshot(snapshot) or seated.color or 'white'
@@ -1420,6 +2659,60 @@ local function configuredTargetSystem()
     return nil
 end
 
+function crChessTargetEntities(rendered)
+    local entities = {}
+
+    if rendered and rendered.table and DoesEntityExist(rendered.table) then
+        entities[#entities + 1] = rendered.table
+    end
+
+    if rendered and rendered.board and DoesEntityExist(rendered.board) then
+        entities[#entities + 1] = rendered.board
+    end
+
+    return entities
+end
+
+function crChessRenderedActiveMatch(rendered)
+    local snapshot = rendered and rendered.snapshot or nil
+    local matchId = snapshot and tonumber(snapshot.matchId) or nil
+
+    if not matchId then
+        return nil
+    end
+
+    local match = observedMatches[matchId]
+
+    if match and match.state ~= 'active' then
+        return nil
+    end
+
+    return match or {
+        id = matchId,
+        state = 'active'
+    }
+end
+
+function crChessCanTargetSpectate(rendered)
+    return crChessRenderedActiveMatch(rendered) ~= nil
+end
+
+function crChessSpectateTargetMatch(tableId, rendered)
+    local match = crChessRenderedActiveMatch(rendered)
+
+    if not match then
+        notify('There is no active chess match on this board.')
+        return
+    end
+
+    local coords = GetEntityCoords(PlayerPedId())
+    TriggerServerEvent('cr-chess:server:spectateMatch', match.id, {
+        x = coords.x,
+        y = coords.y,
+        z = coords.z
+    })
+end
+
 registerTableTargets = function(tableId, rendered)
     if not rendered or not rendered.table or rendered.targetSystem then
         return
@@ -1437,10 +2730,24 @@ registerTableTargets = function(tableId, rendered)
         rendered.targetNames = {
             'cr_chess_sit_white',
             'cr_chess_sit_black',
-            'cr_chess_menu'
+            'cr_chess_menu',
+            'cr_chess_spectate'
         }
 
-        exports.ox_target:addLocalEntity(rendered.table, {
+        local spectateOption = {
+            name = rendered.targetNames[4],
+            label = 'Spectate Match',
+            icon = 'fa-solid fa-eye',
+            distance = distance,
+            canInteract = function()
+                return crChessCanTargetSpectate(rendered)
+            end,
+            onSelect = function()
+                crChessSpectateTargetMatch(tableId, rendered)
+            end
+        }
+
+        local options = {
             {
                 name = rendered.targetNames[1],
                 label = 'Sit as White',
@@ -1467,10 +2774,32 @@ registerTableTargets = function(tableId, rendered)
                 onSelect = function()
                     openTableMenu(tableId, seated.tableId == tableId and seated.color or nil)
                 end
-            }
-        })
+            },
+            spectateOption
+        }
+
+        rendered.targetEntities = crChessTargetEntities(rendered)
+
+        exports.ox_target:addLocalEntity(rendered.table, options)
+
+        if rendered.board and DoesEntityExist(rendered.board) then
+            exports.ox_target:addLocalEntity(rendered.board, { spectateOption })
+        end
     elseif system == 'qb' then
-        exports['qb-target']:AddTargetEntity(rendered.table, {
+        rendered.targetEntities = crChessTargetEntities(rendered)
+
+        local spectateOption = {
+            label = 'Spectate Match',
+            icon = 'fas fa-eye',
+            canInteract = function()
+                return crChessCanTargetSpectate(rendered)
+            end,
+            action = function()
+                crChessSpectateTargetMatch(tableId, rendered)
+            end
+        }
+
+        local targetConfig = {
             options = {
                 {
                     label = 'Sit as White',
@@ -1492,32 +2821,56 @@ registerTableTargets = function(tableId, rendered)
                     action = function()
                         openTableMenu(tableId, seated.tableId == tableId and seated.color or nil)
                     end
-                }
+                },
+                spectateOption
             },
             distance = distance
-        })
+        }
+
+        exports['qb-target']:AddTargetEntity(rendered.table, targetConfig)
+
+        if rendered.board and DoesEntityExist(rendered.board) then
+            exports['qb-target']:AddTargetEntity(rendered.board, {
+                options = { spectateOption },
+                distance = distance
+            })
+        end
     end
 
     rendered.targetSystem = system
 end
 
 unregisterTableTargets = function(rendered)
-    if not rendered or not rendered.targetSystem or not rendered.table then
+    if not rendered or not rendered.targetSystem then
         return
     end
 
+    local targetEntities = rendered.targetEntities or crChessTargetEntities(rendered)
+
     if rendered.targetSystem == 'ox' and GetResourceState('ox_target') == 'started' then
-        exports.ox_target:removeLocalEntity(rendered.table, rendered.targetNames or {
+        local targetNames = rendered.targetNames or {
             'cr_chess_sit_white',
             'cr_chess_sit_black',
-            'cr_chess_menu'
-        })
+            'cr_chess_menu',
+            'cr_chess_spectate'
+        }
+
+        for _, entity in ipairs(targetEntities) do
+            if entity and DoesEntityExist(entity) then
+                exports.ox_target:removeLocalEntity(entity, targetNames)
+            end
+        end
     elseif rendered.targetSystem == 'qb' and GetResourceState('qb-target') == 'started' then
-        exports['qb-target']:RemoveTargetEntity(rendered.table)
+        for _, entity in ipairs(targetEntities) do
+            if entity and DoesEntityExist(entity) then
+                exports['qb-target']:RemoveTargetEntity(entity)
+            end
+        end
     end
 
     rendered.targetSystem = nil
     rendered.targetNames = nil
+    rendered.targetEntities = nil
 end
 
 local function useSeatAvatarForPlayer()
@@ -1646,6 +2999,12 @@ local function shouldFreezeSeatedPed(ped)
 
     if ped and ped == PlayerPedId() then
         return not Config.Animations or Config.Animations.freezePlayerSeat ~= false
+    end
+
+    for _, player in ipairs(GetActivePlayers()) do
+        if player ~= PlayerId() and GetPlayerPed(player) == ped then
+            return false
+        end
     end
 
     return true
@@ -2008,6 +3367,21 @@ local function wagerConfigPayload()
     }
 end
 
+local function clockConfigPayload()
+    local clock = Config.Clock or {}
+    local initialSeconds = tonumber(clock.initialSeconds)
+
+    if not initialSeconds then
+        initialSeconds = (tonumber(clock.initialMinutes) or 10) * 60
+    end
+
+    return {
+        enabled = clock.enabled ~= false,
+        initialMs = math.max(1000, math.floor(initialSeconds * 1000)),
+        incrementMs = math.max(0, math.floor((tonumber(clock.incrementSeconds) or 0) * 1000))
+    }
+end
+
 local function nearbyPlayers()
     local players = {}
     local range = (Config.Invites and Config.Invites.range) or 4.0
@@ -2089,7 +3463,8 @@ openTableMenu = function(tableId, color, extra)
         invitePlayers = extra.invitePlayers,
         inviteMode = extra.inviteMode,
         wagerAmount = extra.wagerAmount,
-        wagers = wagerConfigPayload()
+        wagers = wagerConfigPayload(),
+        clock = clockConfigPayload()
     })
 end
 
@@ -2354,6 +3729,98 @@ local function deleteTunePreview()
         tunePreview.ped = nil
         tunePreview.target = nil
     end
+
+    for _, entity in ipairs(tunePreview.captured or {}) do
+        deleteEntity(entity)
+    end
+
+    tunePreview.captured = {}
+    tunePreview.capturedTarget = nil
+end
+
+function crChessCapturedPreviewCodes(side)
+    local prefix = side == 'white' and 'w' or 'b'
+
+    return {
+        prefix .. 'P',
+        prefix .. 'P',
+        prefix .. 'P',
+        prefix .. 'P',
+        prefix .. 'P',
+        prefix .. 'P',
+        prefix .. 'P',
+        prefix .. 'P',
+        prefix .. 'R',
+        prefix .. 'N',
+        prefix .. 'B',
+        prefix .. 'Q',
+        prefix .. 'K',
+        prefix .. 'B',
+        prefix .. 'N',
+        prefix .. 'R'
+    }
+end
+
+function crChessDeleteCapturedTunePreview()
+    for _, entity in ipairs(tunePreview.captured or {}) do
+        deleteEntity(entity)
+    end
+
+    tunePreview.captured = {}
+    tunePreview.capturedTarget = nil
+end
+
+function crChessCreateCapturedTunePreview(rendered, side)
+    crChessDeleteCapturedTunePreview()
+
+    if tunePreview.ped then
+        deleteEntity(tunePreview.ped)
+        tunePreview.ped = nil
+        tunePreview.target = nil
+    end
+
+    if not rendered or not rendered.board or not DoesEntityExist(rendered.board) then
+        return
+    end
+
+    for index, pieceCode in ipairs(crChessCapturedPreviewCodes(side)) do
+        local entity = crChessSpawnCapturedPiece(rendered, side, pieceCode, index)
+
+        if entity and DoesEntityExist(entity) then
+            SetEntityAlpha(entity, 150, false)
+            SetEntityCollision(entity, false, false)
+            FreezeEntityPosition(entity, true)
+            tunePreview.captured[#tunePreview.captured + 1] = entity
+        end
+    end
+
+    tunePreview.capturedTarget = 'captured_' .. side
+end
+
+function crChessUpdateCapturedTunePreview(rendered)
+    if not tuning.enabled or (tuning.target ~= 'captured_white' and tuning.target ~= 'captured_black') then
+        crChessDeleteCapturedTunePreview()
+        return
+    end
+
+    if not rendered or not rendered.board or not DoesEntityExist(rendered.board) then
+        return
+    end
+
+    local side = tuning.target == 'captured_white' and 'white' or 'black'
+
+    if tunePreview.capturedTarget ~= tuning.target or #(tunePreview.captured or {}) == 0 then
+        crChessCreateCapturedTunePreview(rendered, side)
+    end
+
+    for index, entity in ipairs(tunePreview.captured or {}) do
+        if entity and DoesEntityExist(entity) then
+            SetEntityAlpha(entity, 150, false)
+            SetEntityCollision(entity, false, false)
+            FreezeEntityPosition(entity, true)
+            attachEntityToBoardOffset(entity, rendered.board, crChessCapturedOffset(side, index))
+        end
+    end
 end
 
 local function createTunePreview(target)
@@ -2443,10 +3910,54 @@ local function updateTunePreview(rendered)
     drawText3d(vector3(pos.x, pos.y, pos.z + 1.05), color .. ' seat preview')
 end
 
-local function clearBotPed(rendered)
-    if rendered and rendered.botPed then
+local function botDifficultyForColor(snapshot, color)
+    if not snapshot or not color then
+        return nil
+    end
+
+    if snapshot.botDifficulties and snapshot.botDifficulties[color] then
+        return snapshot.botDifficulties[color]
+    end
+
+    if snapshot.mode == 'bot' and color == snapshot.botColor then
+        return snapshot.botDifficulty or 'easy'
+    end
+
+    return nil
+end
+
+clearBotPed = function(rendered, color)
+    if not rendered then
+        return
+    end
+
+    rendered.botPeds = rendered.botPeds or {}
+
+    if color then
+        deleteEntity(rendered.botPeds[color])
+
+        if rendered.botPed == rendered.botPeds[color] then
+            rendered.botPed = nil
+        end
+
+        rendered.botPeds[color] = nil
+        return
+    end
+
+    local deleted = {}
+
+    if rendered.botPed then
+        deleted[rendered.botPed] = true
         deleteEntity(rendered.botPed)
         rendered.botPed = nil
+    end
+
+    for botColor, ped in pairs(rendered.botPeds) do
+        if not deleted[ped] then
+            deleteEntity(ped)
+        end
+
+        rendered.botPeds[botColor] = nil
     end
 end
 
@@ -2461,48 +3972,59 @@ ensureBotPedForMatch = function(snapshot)
         return
     end
 
-    if snapshot.mode ~= 'bot' or snapshot.state == 'finished' then
+    if snapshot.state == 'finished' then
         clearBotPed(rendered)
         return
     end
 
-    local botColor = snapshot.botColor or 'black'
+    local hasBot = false
 
-    if rendered.botPed and DoesEntityExist(rendered.botPed) then
-        if isSeatAnimationLocked(rendered.botPed) then
-            FreezeEntityPosition(rendered.botPed, true)
-        elseif not isSeatAnimationPlaying(rendered.botPed) then
-            seatLocalPedOnTable(rendered.botPed, rendered, botColor, true)
+    rendered.botPeds = rendered.botPeds or {}
+
+    for _, botColor in ipairs({ 'white', 'black' }) do
+        if botDifficultyForColor(snapshot, botColor) then
+            hasBot = true
+
+            local existing = rendered.botPeds[botColor]
+
+            if existing and DoesEntityExist(existing) then
+                if isSeatAnimationLocked(existing) then
+                    FreezeEntityPosition(existing, true)
+                elseif not isSeatAnimationPlaying(existing) then
+                    seatLocalPedOnTable(existing, rendered, botColor, true)
+                else
+                    applySeatTransform(existing, rendered, botColor, nil)
+                    FreezeEntityPosition(existing, true)
+                end
+            else
+                local model = Config.BotPed and Config.BotPed.model or 'mp_m_freemode_01'
+                local hash = loadModel(model)
+
+                if hash then
+                    local tableCoords = GetEntityCoords(rendered.table)
+                    local ped = CreatePed(4, hash, tableCoords.x, tableCoords.y, tableCoords.z, GetEntityHeading(rendered.table), false, true)
+                    SetModelAsNoLongerNeeded(hash)
+
+                    if ped and DoesEntityExist(ped) then
+                        SetEntityInvincible(ped, true)
+                        SetBlockingOfNonTemporaryEvents(ped, true)
+                        SetEntityCollision(ped, false, false)
+                        SetEntityAlpha(ped, Config.BotPed and Config.BotPed.alpha or 255, false)
+
+                        rendered.botPeds[botColor] = ped
+                        rendered.botPed = ped
+                        seatLocalPedOnTable(ped, rendered, botColor, true)
+                    end
+                end
+            end
         else
-            applySeatTransform(rendered.botPed, rendered, botColor, nil)
-            FreezeEntityPosition(rendered.botPed, true)
+            clearBotPed(rendered, botColor)
         end
-
-        return
     end
 
-    local model = Config.BotPed and Config.BotPed.model or 'mp_m_freemode_01'
-    local hash = loadModel(model)
-
-    if not hash then
-        return
+    if not hasBot then
+        clearBotPed(rendered)
     end
-
-    local tableCoords = GetEntityCoords(rendered.table)
-    local ped = CreatePed(4, hash, tableCoords.x, tableCoords.y, tableCoords.z, GetEntityHeading(rendered.table), false, true)
-    SetModelAsNoLongerNeeded(hash)
-
-    if not ped or not DoesEntityExist(ped) then
-        return
-    end
-
-    SetEntityInvincible(ped, true)
-    SetBlockingOfNonTemporaryEvents(ped, true)
-    SetEntityCollision(ped, false, false)
-    SetEntityAlpha(ped, Config.BotPed and Config.BotPed.alpha or 255, false)
-
-    rendered.botPed = ped
-    seatLocalPedOnTable(ped, rendered, botColor, true)
 end
 
 local function oppositeColor(color)
@@ -2525,8 +4047,36 @@ local function sourceForColor(snapshot, color)
     return nil
 end
 
+function crChessSeatSnapshotFromMatch(snapshot)
+    local seats = {}
+
+    if not snapshot then
+        return {
+            seats = seats
+        }
+    end
+
+    if tonumber(snapshot.white) and tonumber(snapshot.white) > 0 then
+        seats.white = {
+            source = tonumber(snapshot.white),
+            name = snapshot.whiteName or 'White'
+        }
+    end
+
+    if tonumber(snapshot.black) and tonumber(snapshot.black) > 0 then
+        seats.black = {
+            source = tonumber(snapshot.black),
+            name = snapshot.blackName or 'Black'
+        }
+    end
+
+    return {
+        seats = seats
+    }
+end
+
 local function isBotColor(snapshot, color)
-    return snapshot and snapshot.mode == 'bot' and color == snapshot.botColor
+    return botDifficultyForColor(snapshot, color) ~= nil
 end
 
 local function pedForReactionColor(rendered, snapshot, color)
@@ -2536,7 +4086,7 @@ local function pedForReactionColor(rendered, snapshot, color)
 
     if isBotColor(snapshot, color) then
         ensureBotPedForMatch(snapshot)
-        return rendered.botPed, true, true
+        return rendered.botPeds and rendered.botPeds[color] or rendered.botPed, true, true
     end
 
     local source = sourceForColor(snapshot, color)
@@ -2555,6 +4105,16 @@ local function pedForReactionColor(rendered, snapshot, color)
 
     if avatar then
         return avatar, true, true
+    end
+
+    local player = GetPlayerFromServerId(source)
+
+    if player ~= -1 then
+        local ped = GetPlayerPed(player)
+
+        if ped and DoesEntityExist(ped) then
+            return ped, false, true
+        end
     end
 
     return nil, false, false
@@ -2799,22 +4359,19 @@ playCaptureReactions = function(snapshot, move, moveColor)
     end
 
     local rendered = snapshot.tableId and renderedTables[snapshot.tableId] or nil
-    local localColor = localColorForSnapshot(snapshot)
 
-    if not rendered or not localColor then
+    if not rendered then
         return
     end
 
     local capturedColor = oppositeColor(moveColor)
-    local localKind = localColor == moveColor and 'captureByPlayer' or 'capturedByOpponent'
 
-    playReactionForColor(rendered, snapshot, localColor, localKind)
-
-    if isBotColor(snapshot, moveColor) then
-        playReactionForColor(rendered, snapshot, moveColor, 'captureByPlayer')
-    elseif isBotColor(snapshot, capturedColor) then
-        playReactionForColor(rendered, snapshot, capturedColor, 'capturedByOpponent')
+    if reconcileSeatAvatars then
+        reconcileSeatAvatars(rendered, crChessSeatSnapshotFromMatch(snapshot))
     end
+
+    playReactionForColor(rendered, snapshot, moveColor, 'captureByPlayer')
+    playReactionForColor(rendered, snapshot, capturedColor, 'capturedByOpponent')
 end
 
 playResultReaction = function(snapshot, result)
@@ -2901,13 +4458,13 @@ local function actorSourceForMove(snapshot, lastMove)
 end
 
 local function moveWasMadeByBot(snapshot, lastMove)
-    if not snapshot or snapshot.mode ~= 'bot' or not lastMove then
+    if not snapshot or not lastMove then
         return false
     end
 
     local actor = tostring(lastMove.actor or '')
 
-    return actor:find('^bot:') ~= nil or lastMove.color == snapshot.botColor
+    return actor:find('^bot:') ~= nil or isBotColor(snapshot, lastMove.color)
 end
 
 playActorMoveAnimation = function(rendered, snapshot, lastMove)
@@ -2926,8 +4483,7 @@ playActorMoveAnimation = function(rendered, snapshot, lastMove)
 
     if moveWasMadeByBot(snapshot, lastMove) then
         ensureBotPedForMatch(snapshot)
-        ped = rendered.botPed
-        color = snapshot.botColor or color
+        ped = rendered.botPeds and rendered.botPeds[color] or rendered.botPed
         reseatAfter = true
         freezeAfter = true
     else
@@ -3262,6 +4818,66 @@ local function drawSelectedPiece(rendered)
     drawText3d(vector3(coords.x, coords.y, coords.z + 0.23), interaction.selectedPiece or interaction.selected)
 end
 
+local function clearLastMoveHoverOutline()
+    local entity = lastMoveHover.outlinedEntity
+
+    if entity and DoesEntityExist(entity) and type(SetEntityDrawOutline) == 'function' then
+        SetEntityDrawOutline(entity, false)
+    end
+
+    lastMoveHover.outlinedEntity = nil
+end
+
+local function moveHoverLabel(move)
+    if not move then
+        return nil
+    end
+
+    local piece = move.finalPiece or move.piece
+    local name = piece and Config.PieceNames and Config.PieceNames[piece] or piece or 'Piece'
+
+    return ('%s from %s'):format(name, move.from or '?')
+end
+
+local function drawLastMoveHover(rendered)
+    local move = lastMoveHover.move
+
+    if not lastMoveHover.visible or not rendered or not rendered.board or not move or not move.from or not move.to then
+        clearLastMoveHoverOutline()
+        return
+    end
+
+    drawSquare(rendered, move.from, { r = 255, g = 205, b = 75, a = 120 })
+    drawSquare(rendered, move.to, { r = 90, g = 205, b = 255, a = 135 })
+
+    local entity = rendered.pieces and rendered.pieces[move.to] or nil
+
+    if entity and DoesEntityExist(entity) then
+        if type(SetEntityDrawOutline) == 'function' then
+            if lastMoveHover.outlinedEntity and lastMoveHover.outlinedEntity ~= entity then
+                clearLastMoveHoverOutline()
+            end
+
+            SetEntityDrawOutline(entity, true)
+            SetEntityDrawOutlineColor(255, 214, 82, 255)
+            lastMoveHover.outlinedEntity = entity
+        end
+
+        local coords = GetEntityCoords(entity)
+        drawText3d(vector3(coords.x, coords.y, coords.z + 0.24), moveHoverLabel(move))
+        return
+    end
+
+    clearLastMoveHoverOutline()
+
+    local offset = squareOffset(move.to)
+
+    if offset then
+        local coords = GetOffsetFromEntityInWorldCoords(rendered.board, offset.x, offset.y, offset.z + 0.12)
+        drawText3d(vector3(coords.x, coords.y, coords.z), moveHoverLabel(move))
+    end
+end
+
 local function drawHighlights(rendered)
     if interaction.selected then
         drawSquare(rendered, interaction.selected, { r = 80, g = 160, b = 255, a = 130 })
@@ -3481,6 +5097,45 @@ local function handleWorldClick(screenX, screenY)
     end
 end
 
+function crChessNormalizeCameraMode(mode)
+    mode = tostring(mode or ''):lower()
+
+    if mode == 'top' or mode == 'topdown' or mode == 'top_down' then
+        return 'topdown'
+    end
+
+    if mode == 'normal' or mode == 'angle' or mode == 'angled' or mode == 'default' then
+        return 'normal'
+    end
+
+    return nil
+end
+
+RegisterNetEvent('cr-chess:client:toggleCameraMode', function(mode)
+    local rendered = getActiveRenderedTable()
+
+    if not rendered or (not interaction.enabled and not seated.active and not currentMatch) then
+        notify('Sit at a chess table or start chess interaction before changing the chess camera.')
+        return
+    end
+
+    local nextMode = crChessNormalizeCameraMode(mode)
+
+    if not nextMode then
+        nextMode = interaction.cameraMode == 'topdown' and 'normal' or 'topdown'
+    end
+
+    interaction.cameraMode = nextMode
+
+    startTableCamera(rendered)
+
+    if nextMode == 'topdown' then
+        notify('Chess camera: top-down view. Use /chess_camera normal or press H to switch back.')
+    else
+        notify('Chess camera: normal angled view. Use /chess_camera top or press H for top-down.')
+    end
+end)
+
 RegisterNetEvent('cr-chess:client:toggleInteract', function()
     interaction.enabled = not interaction.enabled
 
@@ -3576,6 +5231,12 @@ local cycleTuningTarget
 local cycleTuningField
 
 RegisterNUICallback('close', function(_, cb)
+    if spectator.active then
+        stopSpectatorMode()
+        cb({ ok = true, spectator = true })
+        return
+    end
+
     if isActiveLocalMatch() then
         keepActiveMatchUiOpen()
         cb({ ok = true, active = true })
@@ -3588,6 +5249,9 @@ RegisterNUICallback('close', function(_, cb)
     tableMenu.visible = false
     tableMenu.invite = nil
     clearSelection()
+    lastMoveHover.visible = false
+    lastMoveHover.move = nil
+    clearLastMoveHoverOutline()
     sendNui('tableMenu', { visible = false })
     sendNui('matchResult', { visible = false })
 
@@ -3628,6 +5292,26 @@ RegisterNUICallback('boardSquare', function(data, cb)
     cb({ ok = true })
 end)
 
+RegisterNUICallback('lastMoveHover', function(data, cb)
+    data = data or {}
+
+    if data.visible and data.move then
+        lastMoveHover.visible = true
+        lastMoveHover.move = data.move
+    else
+        lastMoveHover.visible = false
+        lastMoveHover.move = nil
+        clearLastMoveHoverOutline()
+    end
+
+    cb({ ok = true })
+end)
+
+RegisterNUICallback('cameraToggle', function(_, cb)
+    TriggerEvent('cr-chess:client:toggleCameraMode')
+    cb({ ok = true })
+end)
+
 RegisterNUICallback('requestLeaderboard', function(_, cb)
     TriggerServerEvent('cr-chess:server:requestLeaderboard')
     cb({ ok = true })
@@ -3638,6 +5322,19 @@ RegisterNUICallback('requestProfile', function(data, cb)
         TriggerServerEvent('cr-chess:server:requestProfile', data.identifier)
     end
 
+    cb({ ok = true })
+end)
+
+RegisterNUICallback('sideRollPick', function(data, cb)
+    data = data or {}
+    TriggerServerEvent('cr-chess:server:submitSideRollPick', tonumber(data.tableId), tonumber(data.number))
+    cb({ ok = true })
+end)
+
+RegisterNUICallback('sideRollClose', function(data, cb)
+    data = data or {}
+    TriggerServerEvent('cr-chess:server:cancelSideRoll', tonumber(data.tableId) or tableMenu.tableId or seated.tableId)
+    sendNui('sideRoll', { visible = false })
     cb({ ok = true })
 end)
 
@@ -3669,6 +5366,8 @@ RegisterNUICallback('tableMenuAction', function(data, cb)
         TriggerServerEvent('cr-chess:server:startSeatedBot', tableId, color, data.difficulty or 'easy')
     elseif action == 'wait' then
         TriggerServerEvent('cr-chess:server:startSeatedWait', tableId, color, mode, wagerAmount)
+    elseif action == 'fairSide' then
+        TriggerServerEvent('cr-chess:server:startSideRoll', tableId, data.vsBot == true)
     elseif action == 'invitePicker' then
         openTableMenu(tableId, color, {
             invitePlayers = nearbyPlayers(),
@@ -3763,10 +5462,23 @@ local function cameraConfigForTarget()
     return nil, nil
 end
 
+local function capturedConfigForTarget()
+    if tuning.target == 'captured_white' then
+        return crChessCapturedConfig('white'), 'white'
+    end
+
+    if tuning.target == 'captured_black' then
+        return crChessCapturedConfig('black'), 'black'
+    end
+
+    return nil, nil
+end
+
 local function tuningValue()
     local field = tuningField()
     local seat = seatConfigForTarget()
     local camera = cameraConfigForTarget()
+    local captured = capturedConfigForTarget()
 
     if seat then
         seat.rotation = seat.rotation or { x = 0.0, y = 0.0, z = seat.headingOffset or 0.0 }
@@ -3800,6 +5512,19 @@ local function tuningValue()
         if field == 'fov' then return camera.fov end
     end
 
+    if captured then
+        captured.offset = captured.offset or { x = 0.0, y = 0.0, z = 0.01 }
+        captured.rotation = captured.rotation or { x = 0.0, y = 0.0, z = 0.0 }
+
+        if field == 'x' or field == 'y' or field == 'z' then
+            return captured.offset[field]
+        end
+
+        if field == 'rotX' then return captured.rotation.x or 0.0 end
+        if field == 'rotY' then return captured.rotation.y or 0.0 end
+        if field == 'rotZ' then return captured.rotation.z or 0.0 end
+    end
+
     return 0
 end
 
@@ -3807,6 +5532,7 @@ local function setTuningValue(value)
     local field = tuningField()
     local seat = seatConfigForTarget()
     local camera = cameraConfigForTarget()
+    local captured = capturedConfigForTarget()
 
     if seat then
         seat.rotation = seat.rotation or { x = 0.0, y = 0.0, z = seat.headingOffset or 0.0 }
@@ -3833,6 +5559,19 @@ local function setTuningValue(value)
         elseif field == 'fov' then
             camera.fov = math.max(20.0, math.min(90.0, value))
         end
+    elseif captured then
+        captured.offset = captured.offset or { x = 0.0, y = 0.0, z = 0.01 }
+        captured.rotation = captured.rotation or { x = 0.0, y = 0.0, z = 0.0 }
+
+        if field == 'x' or field == 'y' or field == 'z' then
+            captured.offset[field] = value
+        elseif field == 'rotX' then
+            captured.rotation.x = value
+        elseif field == 'rotY' then
+            captured.rotation.y = value
+        elseif field == 'rotZ' then
+            captured.rotation.z = value
+        end
     end
 end
 
@@ -3846,6 +5585,14 @@ local function applyTuning()
         if interaction.enabled and rendered then
             startTableCamera(rendered)
         end
+    end
+
+    if tuning.target == 'captured_white' or tuning.target == 'captured_black' then
+        for _, rendered in pairs(renderedTables) do
+            crChessRefreshCapturedPositions(rendered)
+        end
+
+        crChessUpdateCapturedTunePreview(getActiveRenderedTable())
     end
 end
 
@@ -3879,6 +5626,33 @@ local function formatTuningLine()
             camera.lookAt.y,
             camera.lookAt.z,
             camera.fov
+        )
+    end
+
+    local captured, capturedColor = capturedConfigForTarget()
+
+    if captured and capturedColor then
+        captured.offset = captured.offset or { x = 0.0, y = 0.0, z = 0.01 }
+        captured.rotation = captured.rotation or { x = 0.0, y = 0.0, z = 0.0 }
+        captured.columnStep = captured.columnStep or { x = 0.060, y = 0.0, z = 0.0 }
+        captured.rowStep = captured.rowStep or { x = 0.0, y = capturedColor == 'white' and -0.050 or 0.050, z = 0.0 }
+
+        return ('Config.CapturedPieces.%s = { offset = { x = %.3f, y = %.3f, z = %.3f }, headingOffset = %.1f, rotation = { x = %.1f, y = %.1f, z = %.1f }, rowSize = %d, columnStep = { x = %.3f, y = %.3f, z = %.3f }, rowStep = { x = %.3f, y = %.3f, z = %.3f } }'):format(
+            capturedColor,
+            captured.offset.x or 0.0,
+            captured.offset.y or 0.0,
+            captured.offset.z or 0.0,
+            captured.headingOffset or 0.0,
+            captured.rotation.x or 0.0,
+            captured.rotation.y or 0.0,
+            captured.rotation.z or 0.0,
+            captured.rowSize or 8,
+            captured.columnStep.x or 0.0,
+            captured.columnStep.y or 0.0,
+            captured.columnStep.z or 0.0,
+            captured.rowStep.x or 0.0,
+            captured.rowStep.y or 0.0,
+            captured.rowStep.z or 0.0
         )
     end
 
@@ -4017,6 +5791,14 @@ local function drawTuningMarker(rendered)
             DrawMarker(28, look.x, look.y, look.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04, 0.04, 0.04, 80, 200, 255, 150, false, false, 2, false, nil, nil, false)
             drawText3d(vector3(look.x, look.y, look.z + 0.08), tuning.target .. ' lookAt')
         end
+    elseif tuning.target == 'captured_white' or tuning.target == 'captured_black' then
+        local side = tuning.target == 'captured_white' and 'white' or 'black'
+        crChessUpdateCapturedTunePreview(rendered)
+
+        local slot = crChessCapturedOffset(side, 1)
+        local marker = GetOffsetFromEntityInWorldCoords(rendered.board, slot.x, slot.y, slot.z + 0.08)
+        drawText3d(vector3(marker.x, marker.y, marker.z), tuning.target .. ' start')
+        return
     end
 
     if offset then
@@ -4045,7 +5827,7 @@ RegisterNetEvent('cr-chess:client:setTuneTarget', function(target)
     end
 
     if not tuningFields[target] then
-        notify('Tuning target must be seat_white, seat_black, camera_white, or camera_black.')
+        notify('Tuning target must be seat_white, seat_black, camera_white, camera_black, captured_white, or captured_black.')
         return
     end
 
@@ -4053,6 +5835,74 @@ RegisterNetEvent('cr-chess:client:setTuneTarget', function(target)
     tuning.fieldIndex = 1
     tuning.enabled = true
     announceTuning()
+end)
+
+RegisterNetEvent('cr-chess:client:capturedDirection', function(side, direction)
+    side = tostring(side or ''):lower()
+    direction = tostring(direction or ''):lower()
+
+    local directions = {
+        north = true,
+        n = true,
+        south = true,
+        s = true,
+        east = true,
+        e = true,
+        west = true,
+        w = true,
+        left = true,
+        right = true,
+        cw = true,
+        ccw = true,
+        flip = true,
+        opposite = true
+    }
+
+    if side ~= 'white' and side ~= 'black' and side ~= 'both' then
+        if directions[side] or tonumber(side) then
+            direction = side
+
+            if tuning.target == 'captured_white' then
+                side = 'white'
+            elseif tuning.target == 'captured_black' then
+                side = 'black'
+            else
+                side = 'both'
+            end
+        else
+            notify('Use /chess_captured_flip [white|black|both] north|south|east|west|left|right|flip')
+            return
+        end
+    end
+
+    if direction == '' then
+        direction = 'flip'
+    end
+
+    local sides = side == 'both' and { 'white', 'black' } or { side }
+    local previousTarget = tuning.target
+    local changed = false
+
+    for _, capturedSide in ipairs(sides) do
+        if crChessSetCapturedDirection(capturedSide, direction) then
+            changed = true
+            tuning.target = 'captured_' .. capturedSide
+            print('[cr-chess tuning] ' .. formatTuningLine())
+        end
+    end
+
+    tuning.target = previousTarget
+
+    if not changed then
+        notify('Direction must be north, south, east, west, left, right, flip, or a degree value.')
+        return
+    end
+
+    for _, rendered in pairs(renderedTables) do
+        crChessRefreshCapturedPositions(rendered)
+    end
+
+    notify(('Captured piece layout set: %s %s. Config lines printed in F8.'):format(side, direction))
 end)
 
 RegisterNetEvent('cr-chess:client:gizmoSeat', function(color)
@@ -4139,6 +5989,16 @@ RegisterNetEvent('cr-chess:client:matchInvite', function(invite)
     })
 end)
 
+RegisterNetEvent('cr-chess:client:sideRoll', function(data)
+    data = data or {}
+    setNuiVisible(data.visible ~= false, true)
+    sendNui('sideRoll', data)
+
+    if data.state == 'result' and data.whiteName and data.blackName then
+        notify(('Side roll complete: %s plays white, %s plays black.'):format(data.whiteName, data.blackName))
+    end
+end)
+
 RegisterNetEvent('cr-chess:client:forceSeat', function()
     if currentMatch then
         ensureSeatForMatch(currentMatch)
@@ -4163,6 +6023,35 @@ RegisterNetEvent('cr-chess:client:forceStand', function()
     setNuiVisible(false)
     sendNui('tableMenu', { visible = false })
     sendNui('boardOverlay', { visible = false })
+end)
+
+RegisterNetEvent('cr-chess:client:spectateMatch', function(snapshot)
+    if not snapshot then
+        return
+    end
+
+    observedMatches[snapshot.id] = snapshot
+    startSpectatorMode(snapshot)
+end)
+
+RegisterNetEvent('cr-chess:client:stopSpectating', function()
+    stopSpectatorMode()
+    notify('Spectator mode stopped.')
+end)
+
+RegisterNetEvent('cr-chess:client:placeSpectatorBet', function(args)
+    args = args or {}
+
+    local side = args[1]
+    local amount = args[2]
+    local matchId = tonumber(args[3]) or spectator.matchId
+
+    if not matchId then
+        notify('Spectate a match first or pass a match id: /chess_bet white 100 1')
+        return
+    end
+
+    TriggerServerEvent('cr-chess:server:placeSpectatorBet', matchId, side, amount)
 end)
 
 RegisterNetEvent('cr-chess:client:syncTables', function(tables)
@@ -4195,12 +6084,42 @@ RegisterNetEvent('cr-chess:client:updateMatch', function(snapshot)
         return
     end
 
+    observedMatches[snapshot.id] = snapshot
+
     local rendered = renderedTables[snapshot.tableId]
 
     if rendered then
-        applyLastMove(rendered, snapshot)
-        reconcilePieces(rendered, snapshot.board)
-        reconcileCaptured(rendered, snapshot.capturedWhite, snapshot.capturedBlack)
+        if reconcileSeatAvatars then
+            reconcileSeatAvatars(rendered, crChessSeatSnapshotFromMatch(snapshot))
+        end
+
+        local resetKey = 'match:' .. tostring(snapshot.id)
+
+        if crChessShouldAnimateBoardReset(rendered, snapshot.board, resetKey) then
+            crChessAnimateBoardReset(rendered, snapshot.board, resetKey)
+        else
+            applyLastMove(rendered, snapshot)
+            reconcilePieces(rendered, snapshot.board)
+            reconcileCaptured(rendered, snapshot.capturedWhite, snapshot.capturedBlack)
+        end
+
+        rendered.matchId = snapshot.id
+        ensureBotPedForMatch(snapshot)
+    end
+
+    if spectator.active and spectator.matchId == snapshot.id then
+        spectator.snapshot = snapshot
+        updateSpectatorFocus(snapshot)
+
+        if spectatorDuiEnabled() and (spectatorDuiConfig().hideSidePanel ~= false) then
+            sendSpectatorDuiSnapshot(snapshot)
+        else
+            sendSnapshotToNui(snapshot)
+        end
+
+        if snapshot.state == 'finished' then
+            notify('Spectated chess match finished. Backspace or /chess_spectate_stop exits spectator mode.')
+        end
     end
 
     local myServerId = GetPlayerServerId(PlayerId())
@@ -4232,7 +6151,15 @@ RegisterNetEvent('cr-chess:client:updateMatch', function(snapshot)
         showMatchResultFeedback(snapshot)
     end
 
-    sendSnapshotToNui(currentMatch)
+    if currentMatch then
+        sendSnapshotToNui(currentMatch)
+    elseif spectator.active and spectator.snapshot then
+        if spectatorDuiEnabled() and (spectatorDuiConfig().hideSidePanel ~= false) then
+            sendSpectatorDuiSnapshot(spectator.snapshot)
+        else
+            sendSnapshotToNui(spectator.snapshot)
+        end
+    end
 end)
 
 CreateThread(function()
@@ -4240,12 +6167,56 @@ CreateThread(function()
         local shouldDrawLight = Config.BoardLight and Config.BoardLight.enabled ~= false and next(renderedTables) ~= nil
         local hasLightNearby = shouldDrawLight and hasNearbyBoardLight()
         local hasHiddenRemoteSeats = next(hiddenRemoteSeatSources) ~= nil
+        local ambientDuiTargets = crChessAmbientDuiTargets()
+        local hasAmbientDui = #ambientDuiTargets > 0
 
-        if interaction.enabled or tuning.enabled or uvDebug.enabled or seated.active or hasLightNearby or hasHiddenRemoteSeats then
+        if interaction.enabled or tuning.enabled or uvDebug.enabled or seated.active or spectator.active or lastMoveHover.visible or hasLightNearby or hasHiddenRemoteSeats or hasAmbientDui then
             local rendered = getActiveRenderedTable()
             Wait(0)
 
             maintainSeatAvatarVisibility()
+
+            if spectator.active then
+                DisableControlAction(0, 1, true)
+                DisableControlAction(0, 2, true)
+                DisableControlAction(0, 14, true)
+                DisableControlAction(0, 15, true)
+                DisableControlAction(0, 241, true)
+                DisableControlAction(0, 242, true)
+                DisableControlAction(0, 24, true)
+                DisableControlAction(0, 25, true)
+                DisableControlAction(0, 30, true)
+                DisableControlAction(0, 31, true)
+                DisableControlAction(0, 32, true)
+                DisableControlAction(0, 33, true)
+                DisableControlAction(0, 34, true)
+                DisableControlAction(0, 35, true)
+                updateSpectatorCamera()
+                drawText2d(0.018, 0.82, 'Spectating chess match', 0.32)
+                drawText2d(0.018, 0.85, 'Mouse: orbit/height | Wheel: zoom | Backspace: exit', 0.28)
+
+                if IsControlJustPressed(0, 177) or IsDisabledControlJustPressed(0, 177) then
+                    stopSpectatorMode()
+                    notify('Spectator mode stopped.')
+                end
+            end
+
+            if spectator.active then
+                drawSpectatorDui(spectator.tableId and renderedTables[spectator.tableId] or rendered)
+            elseif hasAmbientDui then
+                local activeAmbientDuis = {}
+
+                for _, target in ipairs(ambientDuiTargets) do
+                    activeAmbientDuis[target.tableId] = true
+                    crChessMaybeSyncAmbientDui(target.snapshot)
+                    crChessMaybeRequestAttractMode(target.tableId, target.snapshot)
+                    crChessDrawAmbientSpectatorDui(target.tableId, target.rendered, target.snapshot)
+                end
+
+                crChessDestroyStaleAmbientDuis(activeAmbientDuis)
+            else
+                crChessDestroyStaleAmbientDuis({})
+            end
 
             if interaction.enabled then
                 DisableControlAction(0, 24, true)
@@ -4294,6 +6265,10 @@ CreateThread(function()
 
             if rendered and interaction.enabled then
                 drawHighlights(rendered)
+            end
+
+            if rendered and lastMoveHover.visible then
+                drawLastMoveHover(rendered)
             end
 
             if rendered and uvDebug.enabled then
@@ -4365,6 +6340,7 @@ AddEventHandler('onResourceStop', function(resourceName)
 
     setNuiVisible(false)
     stopTableCamera()
+    stopSpectatorMode(false)
     releaseSeat()
     deleteTunePreview()
     cleanupTablePlacementPreview()

@@ -31,5 +31,8 @@ files {
     'html/index.html',
     'html/style.css',
     'html/app.js',
+    'html/spectator.html',
+    'html/spectator.css',
+    'html/spectator.js',
     'html/sfx/*.ogg'
 }

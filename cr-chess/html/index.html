@@ -11,6 +11,7 @@
     <main id="app" class="hidden">
         <div id="feedback-stack"></div>
         <section id="result-overlay" class="hidden"></section>
+        <section id="side-roll-overlay" class="hidden"></section>
         <section id="table-menu" class="hidden"></section>
         <section id="side-panel">
             <header class="topbar">
@@ -21,14 +22,26 @@
                 <button id="close" title="Close">x</button>
             </header>
 
+            <section id="clock-strip" class="clock-strip hidden">
+                <div id="clock-white" class="clock">
+                    <span>White</span>
+                    <strong>--:--</strong>
+                </div>
+                <div id="clock-black" class="clock">
+                    <span>Black</span>
+                    <strong>--:--</strong>
+                </div>
+            </section>
+
             <nav class="tabs">
                 <button class="tab active" data-tab="moves">Moves</button>
                 <button class="tab" data-tab="board">Board</button>
-                <button class="tab" data-tab="stats">Stats</button>
             </nav>
 
             <section id="moves-tab" class="tab-pane active">
                 <div id="turn-card" class="status-card">Waiting for match data</div>
+                <div id="last-move-card" class="status-card last-move-card hidden">No moves yet</div>
+                <button id="toggle-board" class="wide-button board-toggle hidden">View Board</button>
                 <button id="resign-match" class="wide-button danger hidden">Resign Match</button>
                 <div id="moves-list" class="moves-list"></div>
                 <div id="review-card" class="review hidden"></div>
