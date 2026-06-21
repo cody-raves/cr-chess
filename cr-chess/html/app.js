@@ -86,6 +86,50 @@ const pieceNames = {
     bP: 'Black Pawn'
 };
 
+const pieceLetters = {
+    wK: 'K',
+    wQ: 'Q',
+    wR: 'R',
+    wB: 'B',
+    wN: 'N',
+    wP: 'P',
+    bK: 'K',
+    bQ: 'Q',
+    bR: 'R',
+    bB: 'B',
+    bN: 'N',
+    bP: 'P'
+};
+
+const pieceIcons = {
+    wK: '\u265A',
+    wQ: '\u265B',
+    wR: '\u265C',
+    wB: '\u265D',
+    wN: '\u265E',
+    wP: '\u265F',
+    bK: '\u265A',
+    bQ: '\u265B',
+    bR: '\u265C',
+    bB: '\u265D',
+    bN: '\u265E',
+    bP: '\u265F'
+};
+
+function pieceSide(piece) {
+    return piece?.charAt(0) === 'w' ? 'white' : 'black';
+}
+
+function pieceBadgeHtml(piece, extraClass = '') {
+    if (!piece) return '';
+
+    const side = pieceSide(piece);
+    const label = pieceIcons[piece] || pieceLetters[piece] || piece;
+    const title = pieceNames[piece] || piece;
+
+    return `<span class="piece-badge ${side} ${extraClass}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
+}
+
 function nui(name, data = {}) {
     if (devPreview) {
         if (name === 'boardSquare') {
@@ -845,11 +889,15 @@ function renderLastMove(history) {
     }
 
     const actor = move.color ? `${move.color.charAt(0).toUpperCase()}${move.color.slice(1)}` : 'Last';
-    const piece = pieceNames[move.finalPiece || move.piece] || move.finalPiece || move.piece || 'Piece';
+    const pieceCode = move.finalPiece || move.piece;
+    const piece = pieceNames[pieceCode] || pieceCode || 'Piece';
     clearLastMoveHoverHandlers();
     lastMoveCard.innerHTML = `
         <span class="card-label">Last move</span>
-        <strong>${escapeHtml(actor)} ${escapeHtml(moveText(move))}</strong>
+        <span class="last-move-line">
+            ${pieceBadgeHtml(pieceCode, 'last-move-piece')}
+            <strong>${escapeHtml(actor)} ${escapeHtml(moveText(move))}</strong>
+        </span>
         <span class="move-hover-detail">${escapeHtml(piece)} from ${escapeHtml(move.from)} to ${escapeHtml(move.to)}</span>
     `;
     const showHover = () => setHoveredMove(move);
@@ -953,7 +1001,7 @@ function renderBoard() {
             const cell = document.createElement('button');
             cell.className = `square ${((fileNumber + rank) % 2 === 0) ? 'dark' : 'light'}`;
             cell.dataset.square = square;
-            cell.textContent = pieceGlyphs[piece] || '';
+            cell.innerHTML = pieceBadgeHtml(piece, 'board-piece');
 
             if (selectedSquare === square) cell.classList.add('selected');
             if (legalBySquare[square]) cell.classList.add(legalBySquare[square].capture ? 'capture' : 'legal');

@@ -25,15 +25,17 @@ RegisterCommand('chess_help', function()
         '/chess_table_spawn (preview placement)',
         '/chess_table_delete <tableId>',
         '/chess_table_cleanup [range]',
+        '/chess_table_blip <tableId> on|off|toggle [label]',
         '/chess_create casual',
         '/chess_create ranked',
         '/chess_create bot easy|medium|hard',
         '/chess_test_bots [whiteDifficulty] [blackDifficulty]',
         '/chess_spectate [matchId]',
         '/chess_spectate_stop',
+        '/chess_spectate_focus',
         '/chess_bet white|black <amount> [matchId]',
         '/chess_interact',
-        '/chess_camera [normal|top] (or H)',
+        '/chess_camera [normal|top] (or G while playing/spectating)',
         '/chess_menu',
         '/chess_sound take|taken|win|lose|draw [index]',
         '/chess_sound sfx/take_piece.ogg',
@@ -68,6 +70,18 @@ RegisterCommand('chess_table_cleanup', function(_, args)
     TriggerServerEvent('cr-chess:server:cleanupTablesNear', playerCoords(), tonumber(args[1]))
 end, false)
 
+RegisterCommand('chess_table_blip', function(_, args)
+    local tableId = args[1]
+    local state = args[2]
+    local label = nil
+
+    if #args >= 3 then
+        label = table.concat(args, ' ', 3)
+    end
+
+    TriggerServerEvent('cr-chess:server:setTableBlip', tableId, state, label)
+end, false)
+
 RegisterCommand('chess_create', function(_, args)
     TriggerServerEvent('cr-chess:server:createMatch', args, playerCoords())
 end, false)
@@ -82,6 +96,10 @@ end, false)
 
 RegisterCommand('chess_spectate_stop', function()
     TriggerEvent('cr-chess:client:stopSpectating')
+end, false)
+
+RegisterCommand('chess_spectate_focus', function()
+    TriggerEvent('cr-chess:client:toggleSpectatorMoveFocus')
 end, false)
 
 RegisterCommand('chess_bet', function(_, args)

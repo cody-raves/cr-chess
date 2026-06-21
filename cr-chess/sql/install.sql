@@ -29,3 +29,21 @@ CREATE TABLE IF NOT EXISTS chess_matches (
     started_at TIMESTAMP NULL,
     ended_at TIMESTAMP NULL
 );
+
+CREATE TABLE IF NOT EXISTS chess_tables (
+    id INT NOT NULL PRIMARY KEY,
+    x DOUBLE NOT NULL,
+    y DOUBLE NOT NULL,
+    z DOUBLE NOT NULL,
+    heading DOUBLE NOT NULL DEFAULT 0,
+    created_by_identifier VARCHAR(64),
+    created_by_name VARCHAR(64),
+    blip_enabled TINYINT(1) NOT NULL DEFAULT 1,
+    blip_label VARCHAR(64) NOT NULL DEFAULT 'Chess Table',
+    blip_sprite INT NOT NULL DEFAULT 280,
+    blip_color INT NOT NULL DEFAULT 25,
+    blip_scale DOUBLE NOT NULL DEFAULT 0.72,
+    blip_short_range TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);

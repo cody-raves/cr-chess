@@ -1,4 +1,5 @@
 local renderedTables = {}
+local tableBlips = {}
 local currentMatch = nil
 local tableCamera = nil
 local ensureSeatForMatch
@@ -16,6 +17,8 @@ local drawText3d
 local drawText2d
 local registerTableTargets
 local unregisterTableTargets
+local updateTableBlip
+local removeTableBlip
 local openTableMenu
 local sendSnapshotToNui
 local crChessDestroyAmbientDui
@@ -109,6 +112,8 @@ local spectator = {
     focusSquare = nil,
     focusUntil = 0,
     snapshot = nil,
+    cameraMode = 'orbit',
+    moveFocus = true,
     dui = {
         dui = nil,
         txd = nil,
@@ -161,7 +166,7 @@ local function playNuiSoundFile(file, volume)
     })
 end
 
-local function soundDistanceVolume(rendered)
+function soundDistanceVolume(rendered)
     local sounds = Config.Sounds or {}
     local baseVolume = tonumber(sounds.volume) or 0.55
 
@@ -330,12 +335,12 @@ local soundAliases = {
     draw = 'draw'
 }
 
-local function isAudioFile(value)
+function isAudioFile(value)
     value = tostring(value or ''):lower()
     return value:match('%.ogg$')
 end
 
-local function normalizeSoundFile(value)
+function normalizeSoundFile(value)
     value = tostring(value or ''):gsub('\\', '/')
 
     if value == '' or not isAudioFile(value) then
@@ -594,6 +599,81 @@ local function toVector3(coords)
     return vector3(coords.x, coords.y, coords.z)
 end
 
+local function tableBlipsEnabled()
+    local blips = Config.TableBlips or {}
+
+    return blips.enabled ~= false
+end
+
+local function tableBlipData(tableData)
+    if not tableBlipsEnabled() or not tableData or not tableData.coords then
+        return nil
+    end
+
+    local defaults = Config.TableBlips or {}
+    local blip = tableData.blip or {}
+
+    if blip.enabled == false then
+        return nil
+    end
+
+    return {
+        label = tostring(blip.label or defaults.label or 'Chess Table'),
+        sprite = tonumber(blip.sprite or defaults.sprite) or 280,
+        color = tonumber(blip.color or defaults.color) or 25,
+        scale = tonumber(blip.scale or defaults.scale) or 0.72,
+        shortRange = blip.shortRange ~= false
+    }
+end
+
+removeTableBlip = function(tableId)
+    tableId = tonumber(tableId)
+
+    if not tableId then
+        return
+    end
+
+    local blip = tableBlips[tableId]
+
+    if blip and DoesBlipExist(blip) then
+        RemoveBlip(blip)
+    end
+
+    tableBlips[tableId] = nil
+end
+
+updateTableBlip = function(tableData)
+    if not tableData or not tableData.id then
+        return
+    end
+
+    local data = tableBlipData(tableData)
+
+    if not data then
+        removeTableBlip(tableData.id)
+        return
+    end
+
+    local coords = toVector3(tableData.coords)
+    local blip = tableBlips[tableData.id]
+
+    if not blip or not DoesBlipExist(blip) then
+        blip = AddBlipForCoord(coords.x, coords.y, coords.z)
+        tableBlips[tableData.id] = blip
+    else
+        SetBlipCoords(blip, coords.x, coords.y, coords.z)
+    end
+
+    SetBlipSprite(blip, data.sprite)
+    SetBlipDisplay(blip, 4)
+    SetBlipColour(blip, data.color)
+    SetBlipScale(blip, data.scale)
+    SetBlipAsShortRange(blip, data.shortRange)
+    BeginTextCommandSetBlipName('STRING')
+    AddTextComponentString(data.label)
+    EndTextCommandSetBlipName(blip)
+end
+
 local function loadModel(model)
     local hash = joaat(model)
 
@@ -632,6 +712,7 @@ end
 
 local function deleteEntity(entity)
     if entity and DoesEntityExist(entity) then
+        SetEntityAsMissionEntity(entity, true, true)
         DeleteEntity(entity)
     end
 end
@@ -1250,6 +1331,10 @@ local function reconcilePieces(rendered, board)
     end
 end
 
+function crChessBoardMoveInProgress(rendered)
+    return rendered and (rendered.moveAnimationUntil or 0) > GetGameTimer()
+end
+
 local function moveKey(snapshot)
     local lastMove = snapshot.lastMove
 
@@ -1314,8 +1399,11 @@ local function applyLastMove(rendered, snapshot)
         local didAnimateActor = playActorMoveAnimation and playActorMoveAnimation(rendered, snapshot, lastMove)
         local delay = didAnimateActor and ((Config.Animations and Config.Animations.pieceMoveDelay) or 0) or 0
         local moveDuration = 650
+        local moveEndsAt = GetGameTimer() + delay + moveDuration + 120
+        rendered.moveAnimationUntil = math.max(rendered.moveAnimationUntil or 0, moveEndsAt)
+        rendered.moveAnimationKey = key
 
-        if spectator.active and spectator.matchId == snapshot.id then
+        if spectator.active and spectator.matchId == snapshot.id and spectator.moveFocus ~= false then
             spectator.followEntity = movingEntity
             spectator.followUntil = GetGameTimer() + delay + moveDuration + ((Config.Spectator and Config.Spectator.moveFollowExtraMs) or 450)
         end
@@ -1338,6 +1426,7 @@ local function applyLastMove(rendered, snapshot)
         if lastMove.promotion then
             animateMove(function()
                 handleMoveLandingFeedback(snapshot, rendered)
+                rendered.moveAnimationUntil = math.max(rendered.moveAnimationUntil or 0, GetGameTimer() + 60)
 
                 if rendered.pieces[lastMove.to] == movingEntity then
                     deleteEntity(movingEntity)
@@ -1349,6 +1438,7 @@ local function applyLastMove(rendered, snapshot)
         else
             animateMove(function()
                 handleMoveLandingFeedback(snapshot, rendered)
+                rendered.moveAnimationUntil = math.max(rendered.moveAnimationUntil or 0, GetGameTimer() + 60)
             end)
         end
     end
@@ -1392,6 +1482,7 @@ local function cleanupTable(tableId)
         crChessDestroyAmbientDui(tableId)
     end
 
+    removeTableBlip(tableId)
     unregisterTableTargets(rendered)
 
     if clearSeatAvatars then
@@ -1435,14 +1526,21 @@ local function renderTable(tableData)
         then
             cleanupTable(tableData.id)
         else
+            if rendered.botMatchId and rendered.botMatchId ~= tableData.matchId then
+                clearBotPed(rendered, nil, true)
+                rendered.botMatchId = nil
+            end
+
             local resetKey = tableData.matchId and ('table:' .. tostring(tableData.matchId)) or nil
-            local didReset = resetKey and crChessShouldAnimateBoardReset(rendered, tableData.board, resetKey)
+            local moving = crChessBoardMoveInProgress(rendered)
+            local didReset = (not moving) and resetKey and crChessShouldAnimateBoardReset(rendered, tableData.board, resetKey)
 
             rendered.snapshot = tableData
+            updateTableBlip(tableData)
 
             if didReset then
                 crChessAnimateBoardReset(rendered, tableData.board, resetKey)
-            else
+            elseif not moving then
                 reconcilePieces(rendered, tableData.board)
                 reconcileCaptured(rendered, tableData.capturedWhite, tableData.capturedBlack)
             end
@@ -1520,8 +1618,12 @@ local function renderTable(tableData)
         capturedBlackCodes = {},
         botPed = nil,
         botPeds = {},
+        botPedModels = {},
+        botMatchId = nil,
         seatAvatars = {},
         matchId = tableData.matchId,
+        moveAnimationUntil = 0,
+        moveAnimationKey = nil,
         resetBoardKey = nil,
         lastMoveKey = nil,
         snapshot = tableData,
@@ -1529,6 +1631,7 @@ local function renderTable(tableData)
     }
 
     registerTableTargets(tableData.id, renderedTables[tableData.id])
+    updateTableBlip(tableData)
 
     for _, chairConfig in ipairs(Config.Chairs) do
         spawnChair(renderedTables[tableData.id], chairConfig)
@@ -2453,6 +2556,14 @@ function updateSpectatorFocus(snapshot)
         return
     end
 
+    if spectator.moveFocus == false then
+        spectator.followEntity = nil
+        spectator.followUntil = 0
+        spectator.focusSquare = nil
+        spectator.focusUntil = 0
+        return
+    end
+
     spectator.focusSquare = snapshot.lastMove.to
     spectator.focusUntil = GetGameTimer() + ((Config.Spectator and Config.Spectator.lastMoveFocusMs) or 1800)
 end
@@ -2555,12 +2666,98 @@ function startSpectatorMode(snapshot)
     notify(('Spectating match %d. Mouse moves camera, wheel zooms, Backspace exits.'):format(snapshot.id))
 end
 
+function crChessNormalizeSpectatorCameraMode(mode)
+    mode = tostring(mode or ''):lower()
+
+    if mode == 'top' or mode == 'topdown' or mode == 'top_down' then
+        return 'topdown'
+    end
+
+    if mode == 'orbit' or mode == 'normal' or mode == 'angle' or mode == 'angled' or mode == 'default' then
+        return 'orbit'
+    end
+
+    return nil
+end
+
+function crChessToggleSpectatorCameraMode(mode)
+    if not spectator.active then
+        return false
+    end
+
+    local nextMode = crChessNormalizeSpectatorCameraMode(mode)
+
+    if not nextMode then
+        nextMode = spectator.cameraMode == 'topdown' and 'orbit' or 'topdown'
+    end
+
+    spectator.cameraMode = nextMode
+    spectator.followEntity = nil
+    spectator.followUntil = 0
+    spectator.focusSquare = nil
+    spectator.focusUntil = 0
+    spectator.focus = nil
+    spectator.camCoords = nil
+
+    if nextMode == 'topdown' then
+        notify('Spectator camera: top-down view. Press G or use /chess_camera normal to switch back.')
+    else
+        notify('Spectator camera: free orbit view. Press G or use /chess_camera top for top-down.')
+    end
+
+    return true
+end
+
+function crChessToggleSpectatorMoveFocus()
+    if not spectator.active then
+        return false
+    end
+
+    spectator.moveFocus = spectator.moveFocus == false
+    spectator.followEntity = nil
+    spectator.followUntil = 0
+    spectator.focusSquare = nil
+    spectator.focusUntil = 0
+
+    if spectator.moveFocus then
+        updateSpectatorFocus(spectator.snapshot)
+        notify('Spectator move focus enabled.')
+    else
+        notify('Spectator move focus disabled.')
+    end
+
+    return true
+end
+
 function updateSpectatorControls(delta)
     local config = Config.Spectator or {}
     local lookX = GetDisabledControlNormal(0, 1)
     local lookY = GetDisabledControlNormal(0, 2)
     local mouseSensitivity = config.mouseSensitivity or 135.0
     local verticalSensitivity = config.verticalSensitivity or 0.55
+
+    if spectator.cameraMode == 'topdown' then
+        local topDown = config.topDown or {}
+        local offset = topDown.offset or {}
+
+        spectator.topDownHeight = spectator.topDownHeight or tonumber(offset.z) or 1.25
+
+        if IsDisabledControlJustPressed(0, 241) or IsControlJustPressed(0, 241) then
+            spectator.topDownHeight = clampValue(
+                spectator.topDownHeight - (config.zoomStep or 0.08),
+                config.minHeight or 0.35,
+                config.maxTopDownHeight or 2.25
+            )
+        elseif IsDisabledControlJustPressed(0, 242) or IsControlJustPressed(0, 242) then
+            spectator.topDownHeight = clampValue(
+                spectator.topDownHeight + (config.zoomStep or 0.08),
+                config.minHeight or 0.35,
+                config.maxTopDownHeight or 2.25
+            )
+        end
+
+        return
+    end
 
     spectator.yaw = (spectator.yaw - lookX * mouseSensitivity * math.max(delta, 0.0)) % 360.0
     spectator.height = clampValue(
@@ -2609,6 +2806,34 @@ function updateSpectatorCamera()
 
     spectator.lastUpdate = now
     updateSpectatorControls(delta)
+
+    if spectator.cameraMode == 'topdown' then
+        local topDown = config.topDown or {}
+        local offset = topDown.offset or {}
+        local lookAt = topDown.lookAt or {}
+        local targetCamCoords = GetOffsetFromEntityInWorldCoords(
+            rendered.board,
+            tonumber(offset.x) or 0.0,
+            tonumber(offset.y) or 0.0,
+            spectator.topDownHeight or tonumber(offset.z) or 1.25
+        )
+        local targetFocus = GetOffsetFromEntityInWorldCoords(
+            rendered.board,
+            tonumber(lookAt.x) or 0.0,
+            tonumber(lookAt.y) or 0.0,
+            tonumber(lookAt.z) or 0.035
+        )
+        local focusAlpha = lerpAlpha(config.focusLerp or 7.5, delta)
+        local cameraAlpha = lerpAlpha(config.cameraLerp or 12.0, delta)
+
+        spectator.focus = lerpCoords(spectator.focus, targetFocus, focusAlpha)
+        spectator.camCoords = lerpCoords(spectator.camCoords, targetCamCoords, cameraAlpha)
+
+        SetCamCoord(spectator.camera, spectator.camCoords.x, spectator.camCoords.y, spectator.camCoords.z)
+        PointCamAtCoord(spectator.camera, spectator.focus.x, spectator.focus.y, spectator.focus.z)
+        SetCamFov(spectator.camera, topDown.fov or 42.0)
+        return
+    end
 
     local radians = math.rad(spectator.yaw or 180.0)
     local radius = spectator.radius or config.radius or 0.95
@@ -3926,21 +4151,80 @@ local function botDifficultyForColor(snapshot, color)
     return nil
 end
 
-clearBotPed = function(rendered, color)
+function botPedModelPool()
+    local config = Config.BotPed or {}
+
+    if type(config.models) == 'table' and #config.models > 0 then
+        return config.models
+    end
+
+    return { config.model or 'a_m_y_business_01' }
+end
+
+function botPedModelForColor(snapshot, color)
+    local pool = botPedModelPool()
+    local seed = (tonumber(snapshot and snapshot.id) or 0) * 37
+
+    for index = 1, #color do
+        seed = seed + string.byte(color, index) * index
+    end
+
+    local index = (math.abs(seed) % #pool) + 1
+
+    return pool[index]
+end
+
+function releaseBotPedEntity(rendered, color, ped)
+    if not ped or not DoesEntityExist(ped) then
+        return
+    end
+
+    SetEntityAsMissionEntity(ped, true, true)
+    FreezeEntityPosition(ped, false)
+    SetEntityCollision(ped, false, false)
+    ClearPedTasksImmediately(ped)
+
+    local target = nil
+
+    if rendered and rendered.table and DoesEntityExist(rendered.table) then
+        local y = color == 'black' and 1.85 or -1.85
+        target = GetOffsetFromEntityInWorldCoords(rendered.table, 0.0, y, 0.0)
+    else
+        local coords = GetEntityCoords(ped)
+        target = vector3(coords.x, coords.y + 1.2, coords.z)
+    end
+
+    TaskGoStraightToCoord(ped, target.x, target.y, target.z, 0.85, 1800, GetEntityHeading(ped), 0.1)
+
+    CreateThread(function()
+        Wait(2300)
+        deleteEntity(ped)
+    end)
+end
+
+clearBotPed = function(rendered, color, leave)
     if not rendered then
         return
     end
 
     rendered.botPeds = rendered.botPeds or {}
+    rendered.botPedModels = rendered.botPedModels or {}
 
     if color then
-        deleteEntity(rendered.botPeds[color])
+        local ped = rendered.botPeds[color]
 
-        if rendered.botPed == rendered.botPeds[color] then
+        if leave then
+            releaseBotPedEntity(rendered, color, ped)
+        else
+            deleteEntity(ped)
+        end
+
+        if rendered.botPed == ped then
             rendered.botPed = nil
         end
 
         rendered.botPeds[color] = nil
+        rendered.botPedModels[color] = nil
         return
     end
 
@@ -3948,17 +4232,27 @@ clearBotPed = function(rendered, color)
 
     if rendered.botPed then
         deleted[rendered.botPed] = true
-        deleteEntity(rendered.botPed)
+        if leave then
+            releaseBotPedEntity(rendered, nil, rendered.botPed)
+        else
+            deleteEntity(rendered.botPed)
+        end
         rendered.botPed = nil
     end
 
     for botColor, ped in pairs(rendered.botPeds) do
         if not deleted[ped] then
-            deleteEntity(ped)
+            if leave then
+                releaseBotPedEntity(rendered, botColor, ped)
+            else
+                deleteEntity(ped)
+            end
         end
 
         rendered.botPeds[botColor] = nil
     end
+
+    rendered.botPedModels = {}
 end
 
 ensureBotPedForMatch = function(snapshot)
@@ -3973,19 +4267,29 @@ ensureBotPedForMatch = function(snapshot)
     end
 
     if snapshot.state == 'finished' then
-        clearBotPed(rendered)
+        clearBotPed(rendered, nil, true)
+        rendered.botMatchId = nil
         return
     end
 
     local hasBot = false
 
     rendered.botPeds = rendered.botPeds or {}
+    rendered.botPedModels = rendered.botPedModels or {}
 
     for _, botColor in ipairs({ 'white', 'black' }) do
         if botDifficultyForColor(snapshot, botColor) then
             hasBot = true
 
+            local model = botPedModelForColor(snapshot, botColor)
+            local modelHash = joaat(model)
             local existing = rendered.botPeds[botColor]
+            rendered.botMatchId = snapshot.id
+
+            if existing and DoesEntityExist(existing) and GetEntityModel(existing) ~= modelHash then
+                clearBotPed(rendered, botColor, true)
+                existing = nil
+            end
 
             if existing and DoesEntityExist(existing) then
                 if isSeatAnimationLocked(existing) then
@@ -3997,7 +4301,6 @@ ensureBotPedForMatch = function(snapshot)
                     FreezeEntityPosition(existing, true)
                 end
             else
-                local model = Config.BotPed and Config.BotPed.model or 'mp_m_freemode_01'
                 local hash = loadModel(model)
 
                 if hash then
@@ -4011,7 +4314,13 @@ ensureBotPedForMatch = function(snapshot)
                         SetEntityCollision(ped, false, false)
                         SetEntityAlpha(ped, Config.BotPed and Config.BotPed.alpha or 255, false)
 
+                        if type(SetPedDefaultComponentVariation) == 'function' then
+                            SetPedDefaultComponentVariation(ped)
+                        end
+
                         rendered.botPeds[botColor] = ped
+                        rendered.botPedModels[botColor] = model
+                        rendered.botMatchId = snapshot.id
                         rendered.botPed = ped
                         seatLocalPedOnTable(ped, rendered, botColor, true)
                     end
@@ -4023,7 +4332,8 @@ ensureBotPedForMatch = function(snapshot)
     end
 
     if not hasBot then
-        clearBotPed(rendered)
+        clearBotPed(rendered, nil, true)
+        rendered.botMatchId = nil
     end
 end
 
@@ -5112,6 +5422,11 @@ function crChessNormalizeCameraMode(mode)
 end
 
 RegisterNetEvent('cr-chess:client:toggleCameraMode', function(mode)
+    if spectator.active then
+        crChessToggleSpectatorCameraMode(mode)
+        return
+    end
+
     local rendered = getActiveRenderedTable()
 
     if not rendered or (not interaction.enabled and not seated.active and not currentMatch) then
@@ -5133,6 +5448,12 @@ RegisterNetEvent('cr-chess:client:toggleCameraMode', function(mode)
         notify('Chess camera: top-down view. Use /chess_camera normal or press H to switch back.')
     else
         notify('Chess camera: normal angled view. Use /chess_camera top or press H for top-down.')
+    end
+end)
+
+RegisterNetEvent('cr-chess:client:toggleSpectatorMoveFocus', function()
+    if not crChessToggleSpectatorMoveFocus() then
+        notify('Start spectating a chess match before toggling move focus.')
     end
 end)
 
@@ -6170,11 +6491,17 @@ CreateThread(function()
         local ambientDuiTargets = crChessAmbientDuiTargets()
         local hasAmbientDui = #ambientDuiTargets > 0
 
-        if interaction.enabled or tuning.enabled or uvDebug.enabled or seated.active or spectator.active or lastMoveHover.visible or hasLightNearby or hasHiddenRemoteSeats or hasAmbientDui then
+        if interaction.enabled or tuning.enabled or uvDebug.enabled or seated.active or currentMatch or spectator.active or lastMoveHover.visible or hasLightNearby or hasHiddenRemoteSeats or hasAmbientDui then
             local rendered = getActiveRenderedTable()
             Wait(0)
 
             maintainSeatAvatarVisibility()
+
+            if not tuning.enabled and not tablePlacement.active and (spectator.active or currentMatch or seated.active or interaction.enabled) then
+                if IsControlJustPressed(0, 47) or IsDisabledControlJustPressed(0, 47) then
+                    TriggerEvent('cr-chess:client:toggleCameraMode')
+                end
+            end
 
             if spectator.active then
                 DisableControlAction(0, 1, true)
@@ -6191,11 +6518,14 @@ CreateThread(function()
                 DisableControlAction(0, 33, true)
                 DisableControlAction(0, 34, true)
                 DisableControlAction(0, 35, true)
+                DisableControlAction(0, 38, true)
                 updateSpectatorCamera()
                 drawText2d(0.018, 0.82, 'Spectating chess match', 0.32)
-                drawText2d(0.018, 0.85, 'Mouse: orbit/height | Wheel: zoom | Backspace: exit', 0.28)
+                drawText2d(0.018, 0.85, 'Mouse: orbit/height | Wheel: zoom | G: top-down | E: move focus | Backspace: exit', 0.28)
 
-                if IsControlJustPressed(0, 177) or IsDisabledControlJustPressed(0, 177) then
+                if IsControlJustPressed(0, 38) or IsDisabledControlJustPressed(0, 38) then
+                    crChessToggleSpectatorMoveFocus()
+                elseif IsControlJustPressed(0, 177) or IsDisabledControlJustPressed(0, 177) then
                     stopSpectatorMode()
                     notify('Spectator mode stopped.')
                 end

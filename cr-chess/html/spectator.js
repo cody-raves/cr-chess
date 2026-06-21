@@ -20,6 +20,10 @@ let perspective = 'white';
 let snapshotReceivedAt = performance.now();
 let lastMoveAnimationKey = null;
 let resultAnimationKey = null;
+let boardGridEl = null;
+let pieceLayerEl = null;
+let renderedPerspective = null;
+const pieceElements = new Map();
 
 const pieceLetters = {
     wK: 'K',
@@ -34,6 +38,21 @@ const pieceLetters = {
     bB: 'B',
     bN: 'N',
     bP: 'P'
+};
+
+const pieceIcons = {
+    wK: '\u265A',
+    wQ: '\u265B',
+    wR: '\u265C',
+    wB: '\u265D',
+    wN: '\u265E',
+    wP: '\u265F',
+    bK: '\u265A',
+    bQ: '\u265B',
+    bR: '\u265C',
+    bB: '\u265D',
+    bN: '\u265E',
+    bP: '\u265F'
 };
 
 const pieceSymbols = {
@@ -143,6 +162,10 @@ function resultKey(data) {
 function clearAnimationAfter(node, ms) {
     setTimeout(() => {
         if (node.parentElement === animationLayer) node.remove();
+
+        if (!animationLayer.querySelector('.capture-anim, .king-anim')) {
+            animationLayer.classList.remove('spotlight');
+        }
     }, ms);
 }
 
@@ -150,6 +173,7 @@ function playCaptureAnimation(move) {
     if (!move?.capturedPiece) return;
 
     animationLayer.innerHTML = '';
+    animationLayer.classList.add('spotlight');
 
     const piece = move.capturedPiece;
     const wrapper = document.createElement('div');
@@ -158,11 +182,11 @@ function playCaptureAnimation(move) {
     const breakPiece = document.createElement('div');
     breakPiece.className = `break-piece ${piece.charAt(0) === 'w' ? 'white' : 'black'}`;
 
-    for (const side of ['left', 'right']) {
-        const half = document.createElement('span');
-        half.className = `piece-half ${side}`;
-        half.textContent = pieceSymbols[piece] || pieceLetters[piece] || piece;
-        breakPiece.append(half);
+    for (const slice of ['left', 'middle', 'right']) {
+        const pieceSlice = document.createElement('span');
+        pieceSlice.className = `piece-slice ${slice}`;
+        pieceSlice.textContent = pieceSymbols[piece] || pieceLetters[piece] || piece;
+        breakPiece.append(pieceSlice);
     }
 
     for (const shardName of ['one', 'two', 'three']) {
@@ -173,11 +197,19 @@ function playCaptureAnimation(move) {
 
     const label = document.createElement('div');
     label.className = 'capture-label';
-    label.textContent = `${pieceNames[piece] || 'Piece'} captured`;
+
+    const title = document.createElement('strong');
+    title.textContent = 'Piece captured';
+
+    const detail = document.createElement('span');
+    const square = move.captureSquare || move.to;
+    detail.textContent = `${pieceNames[piece] || 'Piece'} removed on ${square}`;
+
+    label.append(title, detail);
 
     wrapper.append(breakPiece, label);
     animationLayer.append(wrapper);
-    clearAnimationAfter(wrapper, 1350);
+    clearAnimationAfter(wrapper, 1650);
 }
 
 function playKingFallAnimation(data) {
@@ -187,6 +219,7 @@ function playKingFallAnimation(data) {
     const piece = losingColor === 'white' ? 'wK' : 'bK';
 
     animationLayer.innerHTML = '';
+    animationLayer.classList.add('spotlight');
 
     const wrapper = document.createElement('div');
     wrapper.className = 'king-anim';
@@ -197,7 +230,14 @@ function playKingFallAnimation(data) {
 
     const label = document.createElement('div');
     label.className = 'king-label';
-    label.textContent = `${losingColor.charAt(0).toUpperCase()}${losingColor.slice(1)} resigned`;
+
+    const title = document.createElement('strong');
+    title.textContent = 'King falls';
+
+    const detail = document.createElement('span');
+    detail.textContent = `${losingColor.charAt(0).toUpperCase()}${losingColor.slice(1)} resigned`;
+
+    label.append(title, detail);
 
     wrapper.append(king, label);
     animationLayer.append(wrapper);
@@ -289,34 +329,197 @@ function renderPlayers() {
     }
 }
 
-function renderBoard() {
-    boardEl.innerHTML = '';
-
-    const board = snapshot?.board || {};
-    const lastMove = snapshot?.lastMove || null;
-    const ranks = perspective === 'black'
+function boardRanks() {
+    return perspective === 'black'
         ? [1, 2, 3, 4, 5, 6, 7, 8]
         : [8, 7, 6, 5, 4, 3, 2, 1];
-    const files = perspective === 'black'
+}
+
+function boardFiles() {
+    return perspective === 'black'
         ? ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a']
         : ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+}
+
+function squarePosition(square) {
+    const file = square?.charAt(0);
+    const rank = Number(square?.charAt(1));
+    const files = boardFiles();
+    const ranks = boardRanks();
+    const col = files.indexOf(file);
+    const row = ranks.indexOf(rank);
+
+    if (col < 0 || row < 0) return null;
+
+    return { col, row };
+}
+
+function pieceTransform(square) {
+    const pos = squarePosition(square);
+
+    if (!pos) return 'translate(0%, 0%)';
+
+    return `translate(${pos.col * 100}%, ${pos.row * 100}%) scale(0.76)`;
+}
+
+function ensureBoardStructure() {
+    if (!boardGridEl || !pieceLayerEl) {
+        boardEl.innerHTML = '';
+
+        boardGridEl = document.createElement('div');
+        boardGridEl.className = 'board-grid';
+
+        pieceLayerEl = document.createElement('div');
+        pieceLayerEl.className = 'piece-layer';
+
+        boardEl.append(boardGridEl, pieceLayerEl);
+        renderedPerspective = null;
+    }
+
+    if (renderedPerspective === perspective && boardGridEl.children.length === 64) {
+        return;
+    }
+
+    renderedPerspective = perspective;
+    boardGridEl.innerHTML = '';
+
+    const ranks = boardRanks();
+    const files = boardFiles();
 
     for (const rank of ranks) {
         for (const file of files) {
             const fileNumber = file.charCodeAt(0) - 97;
             const square = `${file}${rank}`;
-            const piece = board[square];
             const cell = document.createElement('div');
+            cell.dataset.square = square;
             cell.className = `square ${((fileNumber + rank) % 2 === 0) ? 'dark' : 'light'}`;
+            boardGridEl.append(cell);
+        }
+    }
 
-            if (lastMove?.from === square) cell.classList.add('last-from');
-            if (lastMove?.to === square) cell.classList.add('last-to');
+    for (const [square, el] of pieceElements) {
+        el.style.transform = pieceTransform(square);
+    }
+}
 
-            if (piece) {
-                cell.innerHTML = `<span class="piece ${piece.charAt(0) === 'w' ? 'white' : 'black'}">${escapeHtml(pieceSymbols[piece] || pieceLetters[piece] || piece)}</span>`;
-            }
+function updateBoardHighlights(lastMove) {
+    if (!boardGridEl) return;
 
-            boardEl.append(cell);
+    for (const cell of boardGridEl.children) {
+        const square = cell.dataset.square;
+
+        cell.classList.toggle('last-from', lastMove?.from === square);
+        cell.classList.toggle('last-to', lastMove?.to === square);
+    }
+}
+
+function updatePieceElement(el, piece) {
+    const wasVisible = el.classList.contains('visible');
+    el.dataset.piece = piece;
+    el.className = `board-piece ${piece.charAt(0) === 'w' ? 'white' : 'black'}`;
+
+    if (wasVisible) {
+        el.classList.add('visible');
+    }
+
+    el.textContent = pieceIcons[piece] || pieceLetters[piece] || piece;
+}
+
+function createPieceElement(piece, square) {
+    const el = document.createElement('span');
+    updatePieceElement(el, piece);
+    el.dataset.square = square;
+    el.style.transform = pieceTransform(square);
+    pieceLayerEl.append(el);
+
+    requestAnimationFrame(() => {
+        el.classList.add('visible');
+    });
+
+    return el;
+}
+
+function removePieceElement(square, animate = true) {
+    const el = pieceElements.get(square);
+
+    if (!el) return;
+
+    pieceElements.delete(square);
+
+    if (!animate) {
+        el.remove();
+        return;
+    }
+
+    el.classList.add('captured');
+    setTimeout(() => el.remove(), 260);
+}
+
+function movePieceElement(from, to, piece) {
+    if (!from || !to || !piece) return false;
+
+    const moving = pieceElements.get(from);
+
+    if (!moving) return false;
+
+    const target = pieceElements.get(to);
+
+    if (target && target !== moving) {
+        removePieceElement(to, true);
+    }
+
+    pieceElements.delete(from);
+    pieceElements.set(to, moving);
+    moving.dataset.square = to;
+    updatePieceElement(moving, piece);
+
+    requestAnimationFrame(() => {
+        moving.style.transform = pieceTransform(to);
+    });
+
+    return true;
+}
+
+function applyAnimatedMove(board, lastMove) {
+    if (!lastMove) return;
+
+    if (lastMove.captureSquare && lastMove.captureSquare !== lastMove.to) {
+        removePieceElement(lastMove.captureSquare, true);
+    }
+
+    if (lastMove.castle && lastMove.rookFrom && lastMove.rookTo && board[lastMove.rookTo]) {
+        movePieceElement(lastMove.rookFrom, lastMove.rookTo, board[lastMove.rookTo]);
+    }
+
+    if (lastMove.from && lastMove.to && board[lastMove.to]) {
+        movePieceElement(lastMove.from, lastMove.to, board[lastMove.to]);
+    }
+}
+
+function renderBoard() {
+    ensureBoardStructure();
+
+    const board = snapshot?.board || {};
+    const lastMove = snapshot?.lastMove || null;
+    const activeSquares = new Set(Object.keys(board));
+
+    updateBoardHighlights(lastMove);
+    applyAnimatedMove(board, lastMove);
+
+    for (const [square, piece] of Object.entries(board)) {
+        const existing = pieceElements.get(square);
+
+        if (existing) {
+            updatePieceElement(existing, piece);
+            existing.style.transform = pieceTransform(square);
+        } else {
+            pieceElements.set(square, createPieceElement(piece, square));
+        }
+    }
+
+    for (const square of Array.from(pieceElements.keys())) {
+        if (!activeSquares.has(square)) {
+            removePieceElement(square, true);
         }
     }
 }
@@ -325,7 +528,7 @@ function renderLastMove() {
     const move = snapshot?.lastMove || null;
     const piece = move?.finalPiece || move?.piece || null;
 
-    lastMovePieceEl.textContent = piece ? (pieceSymbols[piece] || pieceLetters[piece] || piece) : '·';
+    lastMovePieceEl.textContent = piece ? (pieceIcons[piece] || pieceLetters[piece] || piece) : '·';
     lastMovePieceEl.className = `move-piece-icon ${piece ? (piece.charAt(0) === 'w' ? 'white' : 'black') : 'empty'}`;
 
     if (!move) {
@@ -333,7 +536,7 @@ function renderLastMove() {
         return;
     }
 
-    lastMoveEl.textContent = `Last move ${moveText(move)}`;
+    lastMoveEl.textContent = moveText(move);
 }
 
 function renderBetting() {

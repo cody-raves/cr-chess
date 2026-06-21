@@ -74,6 +74,17 @@ local function tableSnapshot(tableData)
         },
         heading = tableData.heading,
         createdBy = tableData.createdBy,
+        createdByIdentifier = tableData.createdByIdentifier,
+        createdByName = tableData.createdByName,
+        persistent = tableData.persistent == true,
+        blip = tableData.blip and {
+            enabled = tableData.blip.enabled ~= false,
+            label = tableData.blip.label,
+            sprite = tableData.blip.sprite,
+            color = tableData.blip.color,
+            scale = tableData.blip.scale,
+            shortRange = tableData.blip.shortRange ~= false
+        } or nil,
         matchId = tableData.matchId,
         board = copyBoard(tableData.board),
         seats = {
@@ -377,6 +388,353 @@ getName = function(source)
     return GetPlayerName(source) or ('Player %s'):format(source)
 end
 
+local persistenceWarned = false
+local persistentTablesLoadStarted = false
+
+local function tableAdminConfig()
+    return Config.TableAdmin or {}
+end
+
+local function canManageTables(source)
+    local admin = tableAdminConfig()
+
+    if admin.requireAce ~= true then
+        return true
+    end
+
+    if source == 0 then
+        return true
+    end
+
+    return type(IsPlayerAceAllowed) == 'function'
+        and IsPlayerAceAllowed(source, admin.ace or 'cr-chess.admin')
+end
+
+local function requireTableAdmin(source)
+    if canManageTables(source) then
+        return true
+    end
+
+    notify(source, 'You do not have permission to manage chess tables.')
+    return false
+end
+
+local function tablePersistenceConfig()
+    return Config.TablePersistence or {}
+end
+
+local function tablePersistenceEnabled()
+    local persistence = tablePersistenceConfig()
+
+    return persistence.enabled == true
+end
+
+local function tableBlipConfig()
+    return Config.TableBlips or {}
+end
+
+local function sqlIdentifier(value, fallback)
+    value = tostring(value or fallback or '')
+
+    if value:match('^[%w_]+$') then
+        return value
+    end
+
+    return fallback
+end
+
+local function chessTablesSqlName()
+    local persistence = tablePersistenceConfig()
+
+    return ('`%s`'):format(sqlIdentifier(persistence.table, 'chess_tables'))
+end
+
+local function warnPersistence(message)
+    if persistenceWarned then
+        return
+    end
+
+    persistenceWarned = true
+    print(('[cr-chess] Table persistence disabled: %s'):format(message))
+end
+
+local function persistenceQuery(sql, params, callback)
+    if not tablePersistenceEnabled() then
+        return false
+    end
+
+    local persistence = tablePersistenceConfig()
+    local driver = tostring(persistence.driver or 'oxmysql'):lower()
+
+    if driver ~= 'oxmysql' then
+        warnPersistence(('unsupported driver "%s"'):format(driver))
+        return false
+    end
+
+    if not resourceStarted('oxmysql') then
+        warnPersistence('oxmysql is not started')
+        return false
+    end
+
+    local ok, err = pcall(function()
+        exports.oxmysql:query(sql, params or {}, function(result)
+            if callback then
+                callback(result or {})
+            end
+        end)
+    end)
+
+    if not ok then
+        warnPersistence(err or 'oxmysql query failed')
+        return false
+    end
+
+    return true
+end
+
+local function boolValue(value, default)
+    if value == nil then
+        return default
+    end
+
+    if value == true or value == 1 or value == '1' or value == 'true' then
+        return true
+    end
+
+    if value == false or value == 0 or value == '0' or value == 'false' then
+        return false
+    end
+
+    return default
+end
+
+local function numberValue(value, fallback)
+    value = tonumber(value)
+
+    if value == nil then
+        return fallback
+    end
+
+    return value
+end
+
+local function tableBlipLabel(tableId)
+    local blips = tableBlipConfig()
+    local format = blips.labelFormat
+
+    if type(format) == 'string' and format ~= '' then
+        local ok, label = pcall(string.format, format, tableId)
+
+        if ok and label and label ~= '' then
+            return label
+        end
+    end
+
+    return blips.label or 'Chess Table'
+end
+
+local function defaultTableBlip(tableId)
+    local blips = tableBlipConfig()
+
+    return {
+        enabled = blips.enabled ~= false,
+        label = tableBlipLabel(tableId),
+        sprite = numberValue(blips.sprite, 280),
+        color = numberValue(blips.color, 25),
+        scale = numberValue(blips.scale, 0.72),
+        shortRange = blips.shortRange ~= false
+    }
+end
+
+local function normalizeTableBlip(tableId, blip)
+    local normalized = defaultTableBlip(tableId)
+
+    if type(blip) ~= 'table' then
+        return normalized
+    end
+
+    normalized.enabled = boolValue(blip.enabled, normalized.enabled)
+    normalized.label = tostring(blip.label or normalized.label)
+    normalized.sprite = numberValue(blip.sprite, normalized.sprite)
+    normalized.color = numberValue(blip.color, normalized.color)
+    normalized.scale = numberValue(blip.scale, normalized.scale)
+    normalized.shortRange = boolValue(blip.shortRange, normalized.shortRange)
+
+    return normalized
+end
+
+local function newTableData(tableId, coords, heading, source, options)
+    options = options or {}
+    tableId = tonumber(tableId)
+
+    return {
+        id = tableId,
+        coords = {
+            x = coords.x,
+            y = coords.y,
+            z = coords.z
+        },
+        heading = tonumber(heading) or 0.0,
+        createdBy = options.createdBy or source,
+        createdByIdentifier = options.createdByIdentifier or (source and getIdentifier(source) or nil),
+        createdByName = options.createdByName or (source and getName(source) or nil),
+        persistent = options.persistent == true,
+        blip = normalizeTableBlip(tableId, options.blip),
+        matchId = nil,
+        seats = {},
+        board = Engine.initialBoard(),
+        capturedWhite = {},
+        capturedBlack = {}
+    }
+end
+
+local function savePersistentTable(tableData, source)
+    if not tableData then
+        return false
+    end
+
+    local blip = normalizeTableBlip(tableData.id, tableData.blip)
+    tableData.blip = blip
+
+    local sql = ([[
+        INSERT INTO %s
+            (id, x, y, z, heading, created_by_identifier, created_by_name, blip_enabled, blip_label, blip_sprite, blip_color, blip_scale, blip_short_range)
+        VALUES
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            x = VALUES(x),
+            y = VALUES(y),
+            z = VALUES(z),
+            heading = VALUES(heading),
+            created_by_identifier = VALUES(created_by_identifier),
+            created_by_name = VALUES(created_by_name),
+            blip_enabled = VALUES(blip_enabled),
+            blip_label = VALUES(blip_label),
+            blip_sprite = VALUES(blip_sprite),
+            blip_color = VALUES(blip_color),
+            blip_scale = VALUES(blip_scale),
+            blip_short_range = VALUES(blip_short_range)
+    ]]):format(chessTablesSqlName())
+
+    return persistenceQuery(sql, {
+        tableData.id,
+        tableData.coords.x,
+        tableData.coords.y,
+        tableData.coords.z,
+        tableData.heading,
+        tableData.createdByIdentifier,
+        tableData.createdByName,
+        blip.enabled and 1 or 0,
+        blip.label,
+        blip.sprite,
+        blip.color,
+        blip.scale,
+        blip.shortRange and 1 or 0
+    }, function()
+        tableData.persistent = true
+        broadcastTable(tableData.id)
+
+        if source then
+            notify(source, ('Saved chess table %d to SQL.'):format(tableData.id))
+        end
+    end)
+end
+
+local function savePersistentTableBlip(tableData, source)
+    if not tableData then
+        return false
+    end
+
+    if not tableData.persistent then
+        return savePersistentTable(tableData, source)
+    end
+
+    local blip = normalizeTableBlip(tableData.id, tableData.blip)
+    tableData.blip = blip
+
+    local sql = ([[
+        UPDATE %s
+        SET blip_enabled = ?, blip_label = ?, blip_sprite = ?, blip_color = ?, blip_scale = ?, blip_short_range = ?
+        WHERE id = ?
+    ]]):format(chessTablesSqlName())
+
+    return persistenceQuery(sql, {
+        blip.enabled and 1 or 0,
+        blip.label,
+        blip.sprite,
+        blip.color,
+        blip.scale,
+        blip.shortRange and 1 or 0,
+        tableData.id
+    }, function()
+        if source then
+            notify(source, ('Updated chess table %d blip.'):format(tableData.id))
+        end
+    end)
+end
+
+local function deletePersistentTable(tableId)
+    local sql = ('DELETE FROM %s WHERE id = ?'):format(chessTablesSqlName())
+
+    return persistenceQuery(sql, { tableId })
+end
+
+local function loadPersistentTables()
+    if persistentTablesLoadStarted then
+        return
+    end
+
+    local sql = ([[
+        SELECT id, x, y, z, heading, created_by_identifier, created_by_name,
+               blip_enabled, blip_label, blip_sprite, blip_color, blip_scale, blip_short_range
+        FROM %s
+        ORDER BY id ASC
+    ]]):format(chessTablesSqlName())
+
+    persistentTablesLoadStarted = true
+
+    if not persistenceQuery(sql, {}, function(rows)
+        local loaded = 0
+        local maxId = nextTableId - 1
+
+        for _, row in ipairs(rows or {}) do
+            local tableId = tonumber(row.id)
+
+            if tableId then
+                local coords = {
+                    x = numberValue(row.x, 0.0),
+                    y = numberValue(row.y, 0.0),
+                    z = numberValue(row.z, 0.0)
+                }
+
+                tables[tableId] = newTableData(tableId, coords, row.heading, nil, {
+                    createdBy = nil,
+                    createdByIdentifier = row.created_by_identifier,
+                    createdByName = row.created_by_name,
+                    persistent = true,
+                    blip = {
+                        enabled = boolValue(row.blip_enabled, true),
+                        label = row.blip_label,
+                        sprite = row.blip_sprite,
+                        color = row.blip_color,
+                        scale = row.blip_scale,
+                        shortRange = boolValue(row.blip_short_range, true)
+                    }
+                })
+
+                loaded = loaded + 1
+                maxId = math.max(maxId, tableId)
+            end
+        end
+
+        nextTableId = math.max(nextTableId, maxId + 1)
+        print(('[cr-chess] Loaded %d persistent chess table%s.'):format(loaded, loaded == 1 and '' or 's'))
+        broadcastTables()
+    end) then
+        persistentTablesLoadStarted = false
+    end
+end
+
 local function distance(a, b)
     local dx = a.x - b.x
     local dy = a.y - b.y
@@ -486,6 +844,7 @@ local function removeIdleTablesNear(coords, range, keepId)
         if tableId ~= keepId and canRemoveIdleTable(tableData) and distance(coords, tableData.coords) <= maxRange then
             clearTableDemoMatch(tableData, false)
             tables[tableId] = nil
+            deletePersistentTable(tableId)
             removed[#removed + 1] = tableId
         end
     end
@@ -2914,6 +3273,10 @@ end)
 RegisterNetEvent('cr-chess:server:createTable', function(coords, heading, requestId)
     local source = source
 
+    if not requireTableAdmin(source) then
+        return
+    end
+
     if not validCoords(coords) then
         return notify(source, 'Invalid table coordinates.')
     end
@@ -2960,28 +3323,24 @@ RegisterNetEvent('cr-chess:server:createTable', function(coords, heading, reques
     local tableId = nextTableId
     nextTableId = nextTableId + 1
 
-    tables[tableId] = {
-        id = tableId,
-        coords = {
-            x = coords.x,
-            y = coords.y,
-            z = coords.z
-        },
-        heading = tonumber(heading) or 0.0,
-        createdBy = source,
-        matchId = nil,
-        seats = {},
-        board = Engine.initialBoard(),
-        capturedWhite = {},
-        capturedBlack = {}
-    }
+    tables[tableId] = newTableData(tableId, coords, heading, source)
 
     broadcastTables()
     notify(source, ('Spawned chess table %d.'):format(tableId))
+
+    if tablePersistenceEnabled() then
+        if not savePersistentTable(tables[tableId], source) then
+            notify(source, 'The table is live for this session, but SQL persistence is unavailable.')
+        end
+    end
 end)
 
 RegisterNetEvent('cr-chess:server:cleanupTablesNear', function(coords, range)
     local source = source
+
+    if not requireTableAdmin(source) then
+        return
+    end
 
     if not validCoords(coords) then
         return notify(source, 'Invalid cleanup coordinates.')
@@ -3004,6 +3363,10 @@ RegisterNetEvent('cr-chess:server:deleteTable', function(tableId)
     local source = source
     tableId = tonumber(tableId)
 
+    if not requireTableAdmin(source) then
+        return
+    end
+
     if not tableId or not tables[tableId] then
         return notify(source, 'Table not found.')
     end
@@ -3021,8 +3384,54 @@ RegisterNetEvent('cr-chess:server:deleteTable', function(tableId)
     end
 
     tables[tableId] = nil
+    deletePersistentTable(tableId)
     broadcastTables()
     notify(source, ('Deleted chess table %d.'):format(tableId))
+end)
+
+RegisterNetEvent('cr-chess:server:setTableBlip', function(tableId, state, label)
+    local source = source
+    tableId = tonumber(tableId)
+
+    if not requireTableAdmin(source) then
+        return
+    end
+
+    local tableData = tableId and tables[tableId] or nil
+
+    if not tableData then
+        return notify(source, 'Table not found.')
+    end
+
+    state = tostring(state or ''):lower()
+
+    if state ~= 'on' and state ~= 'off' and state ~= 'toggle' then
+        return notify(source, 'Use /chess_table_blip <tableId> on|off|toggle [label].')
+    end
+
+    tableData.blip = normalizeTableBlip(tableData.id, tableData.blip)
+
+    if state == 'toggle' then
+        tableData.blip.enabled = not tableData.blip.enabled
+    else
+        tableData.blip.enabled = state == 'on'
+    end
+
+    label = trimName(label)
+
+    if label then
+        tableData.blip.label = label:sub(1, 64)
+    end
+
+    broadcastTable(tableId)
+
+    if tablePersistenceEnabled() then
+        if not savePersistentTableBlip(tableData, source) then
+            notify(source, 'Updated the live blip, but SQL persistence is unavailable.')
+        end
+    else
+        notify(source, ('Updated chess table %d blip.'):format(tableId))
+    end
 end)
 
 RegisterNetEvent('cr-chess:server:createMatch', function(args, coords)
@@ -3134,6 +3543,18 @@ end)
 
 RegisterNetEvent('cr-chess:server:requestProfile', function(identifier)
     sendProfile(source, identifier)
+end)
+
+AddEventHandler('onResourceStart', function(resourceName)
+    if resourceName ~= GetCurrentResourceName() and resourceName ~= 'oxmysql' then
+        return
+    end
+
+    if not tablePersistenceEnabled() then
+        return
+    end
+
+    SetTimeout(500, loadPersistentTables)
 end)
 
 AddEventHandler('playerDropped', function()

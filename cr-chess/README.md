@@ -5,11 +5,14 @@ Standalone FiveM chess POC with server-authoritative rules and local BZZZ prop r
 ## Install
 
 1. Keep the `bzzz_chess` prop resource installed and started.
-2. Put this `cr-chess` folder in your server resources.
-3. Add both resources to `server.cfg` in this order:
+2. Import `sql/install.sql` if you want placed tables and map blips to persist through restarts.
+3. Start `oxmysql` before `cr-chess` when `Config.TablePersistence.enabled = true`.
+4. Put this `cr-chess` folder in your server resources.
+5. Add the resources to `server.cfg` in this order:
 
 ```cfg
 ensure bzzz_chess
+ensure oxmysql
 ensure cr-chess
 ```
 
@@ -19,6 +22,8 @@ ensure cr-chess
 /chess_help
 /chess_table_spawn
 /chess_table_delete <tableId>
+/chess_table_cleanup [range]
+/chess_table_blip <tableId> on|off|toggle [label]
 /chess_create casual
 /chess_create ranked
 /chess_create bot easy
@@ -45,6 +50,8 @@ ensure cr-chess
 /chess_stats
 /chess_leaderboard
 ```
+
+`/chess_table_spawn` uses the placement preview and saves the table to SQL when table persistence is enabled. `/chess_table_delete` and `/chess_table_cleanup` remove saved rows too. Map blips are saved with the table row and can be changed with `/chess_table_blip`.
 
 ## Physical Interaction
 

@@ -12,6 +12,23 @@ Config.TablePlacement = {
     rotateFastStep = 15.0,
     previewAlpha = 165
 }
+Config.TableAdmin = {
+    requireAce = false,
+    ace = 'cr-chess.admin'
+}
+Config.TablePersistence = {
+    enabled = true,
+    driver = 'oxmysql',
+    table = 'chess_tables'
+}
+Config.TableBlips = {
+    enabled = true,
+    labelFormat = 'Chess Table %d',
+    sprite = 280,
+    color = 25,
+    scale = 0.72,
+    shortRange = true
+}
 Config.BotVsBotMoveDelayMs = 850
 Config.BotAI = {
     hardDepth = 2,
@@ -40,7 +57,12 @@ Config.Spectator = {
     focusHeight = 0.08,
     lastMoveFocusMs = 2600,
     moveFollowExtraMs = 450,
-    fov = 55.0
+    fov = 55.0,
+    topDown = {
+        offset = { x = 0.0, y = 0.0, z = 1.25 },
+        lookAt = { x = 0.0, y = 0.0, z = 0.035 },
+        fov = 42.0
+    }
 }
 Config.SpectatorDui = {
     enabled = true,
@@ -52,15 +74,15 @@ Config.SpectatorDui = {
     hideSidePanel = true,
     width = 576,
     height = 792,
-    screenWidth = 0.155,
-    screenHeight = 0.213,
+    screenWidth = 0.205,
+    screenHeight = 0.282,
     offset = { x = 0.0, y = 0.0, z = 1.20 },
     distanceScale = {
         enabled = true,
         nearDistance = 2.0,
         farDistance = 8.0,
-        nearScreenWidth = 0.155,
-        nearScreenHeight = 0.213,
+        nearScreenWidth = 0.205,
+        nearScreenHeight = 0.282,
         farScreenWidth = 0.078,
         farScreenHeight = 0.107,
         nearOffsetZ = 1.20,
@@ -197,7 +219,31 @@ Config.CapturedPieces = {
 }
 
 Config.BotPed = {
-    model = 'mp_m_freemode_01',
+    model = 'a_m_y_business_01',
+    models = {
+        'a_m_y_business_01',
+        'a_m_y_business_02',
+        'a_m_y_business_03',
+        'a_m_m_business_01',
+        'a_f_y_business_01',
+        'a_f_y_business_02',
+        'a_f_y_business_03',
+        'a_f_m_business_02',
+        'a_m_y_bevhills_01',
+        'a_m_y_bevhills_02',
+        'a_f_y_bevhills_01',
+        'a_f_y_bevhills_02',
+        'a_m_y_hipster_01',
+        'a_m_y_hipster_02',
+        'a_f_y_hipster_01',
+        'a_f_y_hipster_02',
+        'a_m_y_vinewood_01',
+        'a_m_y_vinewood_02',
+        'a_f_y_vinewood_01',
+        'a_f_y_vinewood_02',
+        'a_m_m_tourist_01',
+        'a_f_m_tourist_01'
+    },
     alpha = 255
 }
 
