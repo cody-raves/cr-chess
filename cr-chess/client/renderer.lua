@@ -1527,7 +1527,7 @@ local function renderTable(tableData)
             cleanupTable(tableData.id)
         else
             if rendered.botMatchId and rendered.botMatchId ~= tableData.matchId then
-                clearBotPed(rendered, nil, true)
+                clearBotPed(rendered, nil, tableData.matchId == nil)
                 rendered.botMatchId = nil
             end
 
@@ -1619,6 +1619,7 @@ local function renderTable(tableData)
         botPed = nil,
         botPeds = {},
         botPedModels = {},
+        releasedBotPeds = {},
         botMatchId = nil,
         seatAvatars = {},
         matchId = tableData.matchId,
@@ -2048,6 +2049,10 @@ local function startTableCamera(rendered)
     SetCamFov(tableCamera, cameraConfig.fov or 50.0)
     SetCamActive(tableCamera, true)
     RenderScriptCams(true, true, 350, true, true)
+
+    sendNui('cameraMode', {
+        mode = interaction.cameraMode == 'topdown' and 'topdown' or 'normal'
+    })
 end
 
 function stopSpectatorMode(hideUi)
@@ -4174,9 +4179,38 @@ function botPedModelForColor(snapshot, color)
     return pool[index]
 end
 
+function crChessForgetReleasedBotPed(rendered, ped)
+    if not rendered or not rendered.releasedBotPeds or not ped then
+        return
+    end
+
+    for index = #rendered.releasedBotPeds, 1, -1 do
+        if rendered.releasedBotPeds[index] == ped then
+            table.remove(rendered.releasedBotPeds, index)
+        end
+    end
+end
+
+function crChessPurgeReleasedBotPeds(rendered)
+    if not rendered or not rendered.releasedBotPeds then
+        return
+    end
+
+    for _, ped in ipairs(rendered.releasedBotPeds) do
+        deleteEntity(ped)
+    end
+
+    rendered.releasedBotPeds = {}
+end
+
 function releaseBotPedEntity(rendered, color, ped)
     if not ped or not DoesEntityExist(ped) then
         return
+    end
+
+    if rendered then
+        rendered.releasedBotPeds = rendered.releasedBotPeds or {}
+        rendered.releasedBotPeds[#rendered.releasedBotPeds + 1] = ped
     end
 
     SetEntityAsMissionEntity(ped, true, true)
@@ -4199,6 +4233,7 @@ function releaseBotPedEntity(rendered, color, ped)
     CreateThread(function()
         Wait(2300)
         deleteEntity(ped)
+        crChessForgetReleasedBotPed(rendered, ped)
     end)
 end
 
@@ -4253,6 +4288,10 @@ clearBotPed = function(rendered, color, leave)
     end
 
     rendered.botPedModels = {}
+
+    if not leave then
+        crChessPurgeReleasedBotPeds(rendered)
+    end
 end
 
 ensureBotPedForMatch = function(snapshot)
@@ -4272,6 +4311,13 @@ ensureBotPedForMatch = function(snapshot)
         return
     end
 
+    if rendered.botMatchId and rendered.botMatchId ~= snapshot.id then
+        clearBotPed(rendered, nil, false)
+        rendered.botMatchId = nil
+    end
+
+    crChessPurgeReleasedBotPeds(rendered)
+
     local hasBot = false
 
     rendered.botPeds = rendered.botPeds or {}
@@ -4287,7 +4333,7 @@ ensureBotPedForMatch = function(snapshot)
             rendered.botMatchId = snapshot.id
 
             if existing and DoesEntityExist(existing) and GetEntityModel(existing) ~= modelHash then
-                clearBotPed(rendered, botColor, true)
+                clearBotPed(rendered, botColor, false)
                 existing = nil
             end
 
@@ -5445,9 +5491,9 @@ RegisterNetEvent('cr-chess:client:toggleCameraMode', function(mode)
     startTableCamera(rendered)
 
     if nextMode == 'topdown' then
-        notify('Chess camera: top-down view. Use /chess_camera normal or press H to switch back.')
+        notify('Chess camera: top-down view. Use /chess_camera normal, G/H, or the UI button to switch back.')
     else
-        notify('Chess camera: normal angled view. Use /chess_camera top or press H for top-down.')
+        notify('Chess camera: normal angled view. Use /chess_camera top, G/H, or the UI button for top-down.')
     end
 end)
 
@@ -6498,7 +6544,11 @@ CreateThread(function()
             maintainSeatAvatarVisibility()
 
             if not tuning.enabled and not tablePlacement.active and (spectator.active or currentMatch or seated.active or interaction.enabled) then
-                if IsControlJustPressed(0, 47) or IsDisabledControlJustPressed(0, 47) then
+                if IsControlJustPressed(0, 47)
+                    or IsDisabledControlJustPressed(0, 47)
+                    or IsControlJustPressed(0, 74)
+                    or IsDisabledControlJustPressed(0, 74)
+                then
                     TriggerEvent('cr-chess:client:toggleCameraMode')
                 end
             end

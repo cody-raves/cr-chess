@@ -19,7 +19,8 @@ Config.TableAdmin = {
 Config.TablePersistence = {
     enabled = true,
     driver = 'oxmysql',
-    table = 'chess_tables'
+    table = 'chess_tables',
+    autoInstall = true
 }
 Config.TableBlips = {
     enabled = true,
@@ -33,7 +34,14 @@ Config.BotVsBotMoveDelayMs = 850
 Config.BotAI = {
     hardDepth = 2,
     hardRootMoveLimit = 14,
-    hardBranchMoveLimit = 10
+    hardBranchMoveLimit = 10,
+    resign = {
+        enabled = true,
+        minPly = 24,
+        materialDeficit = 900,
+        scoreDeficit = 1100,
+        chancePercent = 75
+    }
 }
 Config.Clock = {
     enabled = true,

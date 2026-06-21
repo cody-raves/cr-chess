@@ -5,8 +5,8 @@ Standalone FiveM chess POC with server-authoritative rules and local BZZZ prop r
 ## Install
 
 1. Keep the `bzzz_chess` prop resource installed and started.
-2. Import `sql/install.sql` if you want placed tables and map blips to persist through restarts.
-3. Start `oxmysql` before `cr-chess` when `Config.TablePersistence.enabled = true`.
+2. Start `oxmysql` before `cr-chess` when `Config.TablePersistence.enabled = true`.
+3. `cr-chess` auto-creates its SQL tables by default with `Config.TablePersistence.autoInstall = true`.
 4. Put this `cr-chess` folder in your server resources.
 5. Add the resources to `server.cfg` in this order:
 
@@ -53,6 +53,8 @@ ensure cr-chess
 
 `/chess_table_spawn` uses the placement preview and saves the table to SQL when table persistence is enabled. `/chess_table_delete` and `/chess_table_cleanup` remove saved rows too. Map blips are saved with the table row and can be changed with `/chess_table_blip`.
 
+`sql/install.sql` is still included as a reference/manual fallback, but admins do not need to run it when auto-install is enabled.
+
 ## Physical Interaction
 
 Use `/chess_interact` while near your chess table or while in a table-bound match.
@@ -93,6 +95,8 @@ After sitting, the table menu can start:
 - Casual 1v1 by inviting a nearby player or waiting for the opponent seat
 - Ranked 1v1 by inviting a nearby player or waiting for the opponent seat
 - Ranked wager matches using the configured wager presets
+
+Dead positions such as king vs king, king and bishop vs king, and king and knight vs king are automatically drawn. Bots can also resign late-game hopeless positions using `Config.BotAI.resign`.
 
 Wagers are optional server-side escrow. `Config.Wagers` auto-detects Qbox, QBCore, or ESX and removes each stake only when both players are ready. A draw refunds both players; a decisive result pays the pot to the winner.
 

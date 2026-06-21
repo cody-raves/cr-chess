@@ -390,6 +390,9 @@ end
 
 local persistenceWarned = false
 local persistentTablesLoadStarted = false
+local databaseSchemaInstallStarted = false
+local databaseSchemaInstalled = false
+local databaseSchemaCallbacks = {}
 
 local function tableAdminConfig()
     return Config.TableAdmin or {}
@@ -427,6 +430,12 @@ local function tablePersistenceEnabled()
     local persistence = tablePersistenceConfig()
 
     return persistence.enabled == true
+end
+
+local function tablePersistenceAutoInstallEnabled()
+    local persistence = tablePersistenceConfig()
+
+    return persistence.autoInstall ~= false
 end
 
 local function tableBlipConfig()
@@ -489,6 +498,133 @@ local function persistenceQuery(sql, params, callback)
         return false
     end
 
+    return true
+end
+
+local function databaseSchemaStatements()
+    return {
+        [[
+            CREATE TABLE IF NOT EXISTS `chess_players` (
+                identifier VARCHAR(64) NOT NULL PRIMARY KEY,
+                name VARCHAR(64) NOT NULL,
+                rating INT NOT NULL DEFAULT 800,
+                casual_wins INT NOT NULL DEFAULT 0,
+                casual_losses INT NOT NULL DEFAULT 0,
+                casual_draws INT NOT NULL DEFAULT 0,
+                ranked_wins INT NOT NULL DEFAULT 0,
+                ranked_losses INT NOT NULL DEFAULT 0,
+                ranked_draws INT NOT NULL DEFAULT 0,
+                bot_wins INT NOT NULL DEFAULT 0,
+                bot_losses INT NOT NULL DEFAULT 0,
+                bot_draws INT NOT NULL DEFAULT 0,
+                games_played INT NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        ]],
+        [[
+            CREATE TABLE IF NOT EXISTS `chess_matches` (
+                id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                mode VARCHAR(16) NOT NULL,
+                result VARCHAR(32) NOT NULL,
+                white_identifier VARCHAR(64),
+                black_identifier VARCHAR(64),
+                winner_identifier VARCHAR(64),
+                starting_fen TEXT,
+                final_fen TEXT,
+                move_history LONGTEXT,
+                started_at TIMESTAMP NULL,
+                ended_at TIMESTAMP NULL
+            )
+        ]],
+        ([[
+            CREATE TABLE IF NOT EXISTS %s (
+                id INT NOT NULL PRIMARY KEY,
+                x DOUBLE NOT NULL,
+                y DOUBLE NOT NULL,
+                z DOUBLE NOT NULL,
+                heading DOUBLE NOT NULL DEFAULT 0,
+                created_by_identifier VARCHAR(64),
+                created_by_name VARCHAR(64),
+                blip_enabled TINYINT(1) NOT NULL DEFAULT 1,
+                blip_label VARCHAR(64) NOT NULL DEFAULT 'Chess Table',
+                blip_sprite INT NOT NULL DEFAULT 280,
+                blip_color INT NOT NULL DEFAULT 25,
+                blip_scale DOUBLE NOT NULL DEFAULT 0.72,
+                blip_short_range TINYINT(1) NOT NULL DEFAULT 1,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        ]]):format(chessTablesSqlName())
+    }
+end
+
+local function flushDatabaseSchemaCallbacks(success)
+    local callbacks = databaseSchemaCallbacks
+    databaseSchemaCallbacks = {}
+
+    for _, callback in ipairs(callbacks) do
+        callback(success == true)
+    end
+end
+
+local function ensureDatabaseSchema(callback)
+    if not tablePersistenceEnabled() or not tablePersistenceAutoInstallEnabled() then
+        if callback then
+            callback(true)
+        end
+
+        return true
+    end
+
+    if databaseSchemaInstalled then
+        if callback then
+            callback(true)
+        end
+
+        return true
+    end
+
+    if callback then
+        databaseSchemaCallbacks[#databaseSchemaCallbacks + 1] = callback
+    end
+
+    if databaseSchemaInstallStarted then
+        return true
+    end
+
+    databaseSchemaInstallStarted = true
+
+    local statements = databaseSchemaStatements()
+    local index = 1
+
+    local function finish(success)
+        if success then
+            databaseSchemaInstalled = true
+            print('[cr-chess] SQL schema is ready.')
+        else
+            databaseSchemaInstallStarted = false
+            print('[cr-chess] SQL schema auto-install could not run.')
+        end
+
+        flushDatabaseSchemaCallbacks(success)
+    end
+
+    local function runNext()
+        if index > #statements then
+            finish(true)
+            return
+        end
+
+        local sql = statements[index]
+        index = index + 1
+
+        if not persistenceQuery(sql, {}, runNext) then
+            finish(false)
+        end
+    end
+
+    runNext()
     return true
 end
 
@@ -684,55 +820,62 @@ local function loadPersistentTables()
         return
     end
 
-    local sql = ([[
-        SELECT id, x, y, z, heading, created_by_identifier, created_by_name,
-               blip_enabled, blip_label, blip_sprite, blip_color, blip_scale, blip_short_range
-        FROM %s
-        ORDER BY id ASC
-    ]]):format(chessTablesSqlName())
-
     persistentTablesLoadStarted = true
 
-    if not persistenceQuery(sql, {}, function(rows)
-        local loaded = 0
-        local maxId = nextTableId - 1
-
-        for _, row in ipairs(rows or {}) do
-            local tableId = tonumber(row.id)
-
-            if tableId then
-                local coords = {
-                    x = numberValue(row.x, 0.0),
-                    y = numberValue(row.y, 0.0),
-                    z = numberValue(row.z, 0.0)
-                }
-
-                tables[tableId] = newTableData(tableId, coords, row.heading, nil, {
-                    createdBy = nil,
-                    createdByIdentifier = row.created_by_identifier,
-                    createdByName = row.created_by_name,
-                    persistent = true,
-                    blip = {
-                        enabled = boolValue(row.blip_enabled, true),
-                        label = row.blip_label,
-                        sprite = row.blip_sprite,
-                        color = row.blip_color,
-                        scale = row.blip_scale,
-                        shortRange = boolValue(row.blip_short_range, true)
-                    }
-                })
-
-                loaded = loaded + 1
-                maxId = math.max(maxId, tableId)
-            end
+    ensureDatabaseSchema(function(schemaReady)
+        if not schemaReady then
+            persistentTablesLoadStarted = false
+            return
         end
 
-        nextTableId = math.max(nextTableId, maxId + 1)
-        print(('[cr-chess] Loaded %d persistent chess table%s.'):format(loaded, loaded == 1 and '' or 's'))
-        broadcastTables()
-    end) then
-        persistentTablesLoadStarted = false
-    end
+        local sql = ([[
+            SELECT id, x, y, z, heading, created_by_identifier, created_by_name,
+                   blip_enabled, blip_label, blip_sprite, blip_color, blip_scale, blip_short_range
+            FROM %s
+            ORDER BY id ASC
+        ]]):format(chessTablesSqlName())
+
+        if not persistenceQuery(sql, {}, function(rows)
+            local loaded = 0
+            local maxId = nextTableId - 1
+
+            for _, row in ipairs(rows or {}) do
+                local tableId = tonumber(row.id)
+
+                if tableId then
+                    local coords = {
+                        x = numberValue(row.x, 0.0),
+                        y = numberValue(row.y, 0.0),
+                        z = numberValue(row.z, 0.0)
+                    }
+
+                    tables[tableId] = newTableData(tableId, coords, row.heading, nil, {
+                        createdBy = nil,
+                        createdByIdentifier = row.created_by_identifier,
+                        createdByName = row.created_by_name,
+                        persistent = true,
+                        blip = {
+                            enabled = boolValue(row.blip_enabled, true),
+                            label = row.blip_label,
+                            sprite = row.blip_sprite,
+                            color = row.blip_color,
+                            scale = row.blip_scale,
+                            shortRange = boolValue(row.blip_short_range, true)
+                        }
+                    })
+
+                    loaded = loaded + 1
+                    maxId = math.max(maxId, tableId)
+                end
+            end
+
+            nextTableId = math.max(nextTableId, maxId + 1)
+            print(('[cr-chess] Loaded %d persistent chess table%s.'):format(loaded, loaded == 1 and '' or 's'))
+            broadcastTables()
+        end) then
+            persistentTablesLoadStarted = false
+        end
+    end)
 end
 
 local function distance(a, b)
@@ -1222,6 +1365,10 @@ local function scorePosition(state, color)
     end
 
     if status.stalemate then
+        return 0
+    end
+
+    if status.insufficientMaterial then
         return 0
     end
 
@@ -1880,6 +2027,11 @@ local function finishIfNeeded(match)
         return true
     end
 
+    if status.insufficientMaterial then
+        finishMatch(match, 'insufficient_material', nil)
+        return true
+    end
+
     return false
 end
 
@@ -1896,6 +2048,61 @@ local function recordCaptured(match, moveInfo)
 end
 
 local runBotTurn
+
+local function botResignConfig()
+    local botConfig = Config.BotAI or {}
+    local resign = botConfig.resign or {}
+
+    return {
+        enabled = resign.enabled ~= false,
+        minPly = tonumber(resign.minPly) or 24,
+        materialDeficit = tonumber(resign.materialDeficit) or 900,
+        scoreDeficit = tonumber(resign.scoreDeficit) or 1100,
+        chancePercent = tonumber(resign.chancePercent) or 75
+    }
+end
+
+local function botShouldResign(match, botColor)
+    if not match or not botColor or match.stateName ~= 'active' then
+        return false
+    end
+
+    local config = botResignConfig()
+
+    if not config.enabled then
+        return false
+    end
+
+    if #(match.moveHistory or {}) < config.minPly then
+        return false
+    end
+
+    local status = Engine.status(match.state)
+
+    if status.checkmate or status.stalemate or status.insufficientMaterial then
+        return false
+    end
+
+    local materialScore = Engine.evaluateMaterial(match.state, botColor)
+
+    if materialScore > -config.materialDeficit then
+        return false
+    end
+
+    local positionalScore = scorePosition(match.state, botColor)
+
+    if positionalScore > -config.scoreDeficit then
+        return false
+    end
+
+    local chance = math.max(0, math.min(100, config.chancePercent))
+
+    if chance <= 0 then
+        return false
+    end
+
+    return math.random(100) <= chance
+end
 
 local function botDifficultyForColor(match, color)
     if not match or not color then
@@ -1999,6 +2206,15 @@ runBotTurn = function(matchId)
     local difficulty = botDifficultyForColor(match, botColor)
 
     if not match or match.stateName ~= 'active' or not difficulty then
+        return
+    end
+
+    if finishIfNeeded(match) then
+        return
+    end
+
+    if botShouldResign(match, botColor) then
+        finishMatch(match, 'bot_resignation', Engine.opposite(botColor))
         return
     end
 

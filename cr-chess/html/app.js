@@ -15,6 +15,7 @@ const resultOverlay = document.getElementById('result-overlay');
 const sideRollOverlay = document.getElementById('side-roll-overlay');
 const resignButton = document.getElementById('resign-match');
 const boardToggleButton = document.getElementById('toggle-board');
+const cameraToggleButton = document.getElementById('toggle-camera');
 const clockStrip = document.getElementById('clock-strip');
 const clockEls = {
     white: document.getElementById('clock-white'),
@@ -40,6 +41,7 @@ let selectedPlayerMode = null;
 let selectedBotDifficulty = 'easy';
 let selectedWagerAmount = null;
 let matchBoardOpen = false;
+let cameraMode = 'normal';
 
 const pieceGlyphs = {
     wK: '♔',
@@ -1094,6 +1096,7 @@ function renderStatus() {
         turnCard.textContent = 'Waiting for match data';
         resignButton.classList.add('hidden');
         boardToggleButton.classList.add('hidden');
+        cameraToggleButton.classList.add('hidden');
         matchBoardOpen = false;
         renderClock();
         return;
@@ -1112,7 +1115,9 @@ function renderStatus() {
     }
     resignButton.classList.toggle('hidden', !active);
     boardToggleButton.classList.toggle('hidden', !active);
+    cameraToggleButton.classList.toggle('hidden', !active);
     boardToggleButton.textContent = matchBoardOpen ? 'Hide Board' : 'View Board';
+    cameraToggleButton.textContent = cameraMode === 'topdown' ? 'Angle View' : 'Top View';
     renderClock();
 }
 
@@ -1230,6 +1235,10 @@ window.addEventListener('message', (event) => {
     if (data.action === 'profile') renderProfile(data.profile);
     if (data.action === 'playSound') playSound(data);
     if (data.action === 'boardOverlay') renderBoardOverlay(data);
+    if (data.action === 'cameraMode') {
+        cameraMode = data.mode === 'topdown' ? 'topdown' : 'normal';
+        renderStatus();
+    }
     if (data.action === 'tableMenu') renderTableMenu(data);
     if (data.action === 'feedback') showFeedback(data);
     if (data.action === 'matchResult') renderMatchResult(data);
@@ -1255,6 +1264,7 @@ boardToggleButton.addEventListener('click', () => {
     matchBoardOpen = !matchBoardOpen;
     renderStatus();
 });
+cameraToggleButton.addEventListener('click', () => nui('cameraToggle'));
 document.getElementById('refresh-leaderboard').addEventListener('click', () => nui('requestLeaderboard'));
 
 for (const tab of document.querySelectorAll('.tab')) {
@@ -1271,7 +1281,7 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') nui('close');
     if (event.key.toLowerCase() === 'q') nui('tuneCycleTarget');
     if (event.key.toLowerCase() === 'e') nui('tuneCycleField');
-    if (!event.repeat && event.key.toLowerCase() === 'h') nui('cameraToggle');
+    if (!event.repeat && (event.key.toLowerCase() === 'h' || event.key.toLowerCase() === 'g')) nui('cameraToggle');
 });
 
 document.addEventListener('wheel', (event) => {

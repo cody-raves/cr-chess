@@ -924,6 +924,12 @@ button {
     background: rgba(255, 255, 255, 0.1);
 }
 
+.camera-toggle {
+    margin-top: 8px;
+    background: rgba(126, 166, 83, 0.26);
+    box-shadow: inset 0 0 0 1px rgba(188, 224, 147, 0.22);
+}
+
 @keyframes soft-grow {
     from {
         opacity: 0;

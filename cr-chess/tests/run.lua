@@ -120,6 +120,28 @@ test('stalemate fixture', function()
     assertTruthy(status.stalemate, 'expected stalemate')
 end)
 
+test('insufficient material bare kings', function()
+    local state = assert(Engine.loadFen('8/8/8/8/8/8/4k3/4K3 w - - 0 1'))
+    local status = Engine.status(state)
+
+    assertTruthy(status.insufficientMaterial, 'expected insufficient material')
+    assertEqual(status.winner, nil)
+end)
+
+test('insufficient material single minor', function()
+    local bishopState = assert(Engine.loadFen('8/8/8/8/8/8/4k3/3BK3 w - - 0 1'))
+    local knightState = assert(Engine.loadFen('8/8/8/8/8/8/4k3/3NK3 w - - 0 1'))
+
+    assertTruthy(Engine.status(bishopState).insufficientMaterial, 'expected king bishop vs king draw')
+    assertTruthy(Engine.status(knightState).insufficientMaterial, 'expected king knight vs king draw')
+end)
+
+test('sufficient material queen remains playable', function()
+    local state = assert(Engine.loadFen('8/8/8/8/8/8/4k3/3QK3 w - - 0 1'))
+
+    assertEqual(Engine.status(state).insufficientMaterial, false)
+end)
+
 test('castling', function()
     local state = assert(Engine.loadFen('r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1'))
 

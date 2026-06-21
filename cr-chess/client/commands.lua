@@ -35,7 +35,7 @@ RegisterCommand('chess_help', function()
         '/chess_spectate_focus',
         '/chess_bet white|black <amount> [matchId]',
         '/chess_interact',
-        '/chess_camera [normal|top] (or G while playing/spectating)',
+        '/chess_camera [normal|top] (or G/H while playing/spectating)',
         '/chess_menu',
         '/chess_sound take|taken|win|lose|draw [index]',
         '/chess_sound sfx/take_piece.ogg',

@@ -844,16 +844,83 @@ function Engine.move(state, from, to, promotion)
     return true, Engine.applyMoveUnchecked(state, legalMove)
 end
 
+function Engine.insufficientMaterial(state)
+    local pieces = {
+        white = {},
+        black = {}
+    }
+
+    for square, piece in pairs(state.board or {}) do
+        local color = Engine.pieceColor(piece)
+        local pieceType = piece and piece:sub(2, 2)
+
+        if color and pieceType ~= 'K' then
+            pieces[color][#pieces[color] + 1] = {
+                type = pieceType,
+                square = square
+            }
+        end
+    end
+
+    local white = pieces.white
+    local black = pieces.black
+    local total = #white + #black
+
+    if total == 0 then
+        return true, 'bare_kings'
+    end
+
+    for _, side in ipairs({ white, black }) do
+        for _, piece in ipairs(side) do
+            if piece.type == 'P' or piece.type == 'R' or piece.type == 'Q' then
+                return false
+            end
+        end
+    end
+
+    if total == 1 then
+        local only = white[1] or black[1]
+
+        if only.type == 'B' or only.type == 'N' then
+            return true, 'single_minor'
+        end
+    end
+
+    if #white == 1 and #black == 1 and white[1].type == 'B' and black[1].type == 'B' then
+        local whiteFile, whiteRank = Engine.squareToCoords(white[1].square)
+        local blackFile, blackRank = Engine.squareToCoords(black[1].square)
+
+        if whiteFile and blackFile and ((whiteFile + whiteRank) % 2) == ((blackFile + blackRank) % 2) then
+            return true, 'same_color_bishops'
+        end
+    end
+
+    return false
+end
+
 function Engine.status(state)
     local color = state.turn
     local inCheck = Engine.isInCheck(state, color)
     local legalMoves = Engine.generateLegalMoves(state, color)
+    local insufficientMaterial, insufficientReason = Engine.insufficientMaterial(state)
+
+    if insufficientMaterial then
+        return {
+            check = inCheck,
+            checkmate = false,
+            stalemate = false,
+            insufficientMaterial = true,
+            insufficientReason = insufficientReason,
+            winner = nil
+        }
+    end
 
     if #legalMoves == 0 and inCheck then
         return {
             check = true,
             checkmate = true,
             stalemate = false,
+            insufficientMaterial = false,
             winner = Engine.opposite(color)
         }
     end
@@ -863,6 +930,7 @@ function Engine.status(state)
             check = false,
             checkmate = false,
             stalemate = true,
+            insufficientMaterial = false,
             winner = nil
         }
     end
@@ -871,6 +939,7 @@ function Engine.status(state)
         check = inCheck,
         checkmate = false,
         stalemate = false,
+        insufficientMaterial = false,
         winner = nil
     }
 end
