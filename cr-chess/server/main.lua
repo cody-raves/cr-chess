@@ -838,6 +838,9 @@ local function loadPersistentTables()
         if not persistenceQuery(sql, {}, function(rows)
             local loaded = 0
             local maxId = nextTableId - 1
+            local loadedCoords = {}
+            local duplicateIds = {}
+            local reuseRange = tonumber(Config.TableSpawnReuseRange) or 1.25
 
             for _, row in ipairs(rows or {}) do
                 local tableId = tonumber(row.id)
@@ -849,24 +852,50 @@ local function loadPersistentTables()
                         z = numberValue(row.z, 0.0)
                     }
 
-                    tables[tableId] = newTableData(tableId, coords, row.heading, nil, {
-                        createdBy = nil,
-                        createdByIdentifier = row.created_by_identifier,
-                        createdByName = row.created_by_name,
-                        persistent = true,
-                        blip = {
-                            enabled = boolValue(row.blip_enabled, true),
-                            label = row.blip_label,
-                            sprite = row.blip_sprite,
-                            color = row.blip_color,
-                            scale = row.blip_scale,
-                            shortRange = boolValue(row.blip_short_range, true)
-                        }
-                    })
+                    local duplicateOf = nil
 
-                    loaded = loaded + 1
-                    maxId = math.max(maxId, tableId)
+                    for _, loadedEntry in ipairs(loadedCoords) do
+                        local dx = coords.x - loadedEntry.coords.x
+                        local dy = coords.y - loadedEntry.coords.y
+                        local dz = coords.z - loadedEntry.coords.z
+
+                        if math.sqrt(dx * dx + dy * dy + dz * dz) <= reuseRange then
+                            duplicateOf = loadedEntry.id
+                            break
+                        end
+                    end
+
+                    if duplicateOf then
+                        duplicateIds[#duplicateIds + 1] = tableId
+                        print(('[cr-chess] Removing duplicate persistent table %d near table %d.'):format(tableId, duplicateOf))
+                    else
+                        tables[tableId] = newTableData(tableId, coords, row.heading, nil, {
+                            createdBy = nil,
+                            createdByIdentifier = row.created_by_identifier,
+                            createdByName = row.created_by_name,
+                            persistent = true,
+                            blip = {
+                                enabled = boolValue(row.blip_enabled, true),
+                                label = row.blip_label,
+                                sprite = row.blip_sprite,
+                                color = row.blip_color,
+                                scale = row.blip_scale,
+                                shortRange = boolValue(row.blip_short_range, true)
+                            }
+                        })
+
+                        loadedCoords[#loadedCoords + 1] = {
+                            id = tableId,
+                            coords = coords
+                        }
+                        loaded = loaded + 1
+                        maxId = math.max(maxId, tableId)
+                    end
                 end
+            end
+
+            for _, duplicateId in ipairs(duplicateIds) do
+                deletePersistentTable(duplicateId)
             end
 
             nextTableId = math.max(nextTableId, maxId + 1)

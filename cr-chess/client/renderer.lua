@@ -730,6 +730,105 @@ local function createObject(model, coords)
     return object
 end
 
+function crChessPurgeDuplicateTableObjects(rendered)
+    if not rendered
+        or rendered.destroyed
+        or type(GetGamePool) ~= 'function'
+        or not rendered.table
+        or not DoesEntityExist(rendered.table)
+        or not rendered.board
+        or not DoesEntityExist(rendered.board)
+    then
+        return
+    end
+
+    local keep = {
+        [rendered.table] = true,
+        [rendered.board] = true
+    }
+
+    for _, chair in ipairs(rendered.chairs or {}) do
+        keep[chair] = true
+    end
+
+    for _, piece in pairs(rendered.pieces or {}) do
+        keep[piece] = true
+    end
+
+    for _, side in ipairs({ 'white', 'black' }) do
+        for _, entry in ipairs(rendered.captured[side] or {}) do
+            if entry.entity then
+                keep[entry.entity] = true
+            end
+        end
+    end
+
+    for _, entity in ipairs(tunePreview.captured or {}) do
+        if entity then
+            keep[entity] = true
+        end
+    end
+
+    local tableHash = joaat(Config.Props.table)
+    local boardHash = joaat(Config.Props.board)
+    local chairHash = joaat(Config.Props.chair)
+    local pieceHashes = {}
+    local chairPositions = {}
+
+    for _, model in pairs(Config.Props.pieces or {}) do
+        pieceHashes[joaat(model)] = true
+    end
+
+    for _, chair in ipairs(rendered.chairs or {}) do
+        if chair and DoesEntityExist(chair) then
+            chairPositions[#chairPositions + 1] = GetEntityCoords(chair)
+        end
+    end
+
+    local tableCoords = GetEntityCoords(rendered.table)
+    local boardCoords = GetEntityCoords(rendered.board)
+
+    for _, entity in ipairs(GetGamePool('CObject')) do
+        if entity
+            and DoesEntityExist(entity)
+            and not keep[entity]
+        then
+            local hash = GetEntityModel(entity)
+            local coords = GetEntityCoords(entity)
+            local dx = coords.x - tableCoords.x
+            local dy = coords.y - tableCoords.y
+            local dz = coords.z - tableCoords.z
+            local tableDistance = math.sqrt(dx * dx + dy * dy + dz * dz)
+            local bx = coords.x - boardCoords.x
+            local by = coords.y - boardCoords.y
+            local bz = coords.z - boardCoords.z
+            local boardDistance = math.sqrt(bx * bx + by * by + bz * bz)
+            local duplicateChair = false
+
+            if hash == chairHash then
+                for _, chairCoords in ipairs(chairPositions) do
+                    local cx = coords.x - chairCoords.x
+                    local cy = coords.y - chairCoords.y
+                    local cz = coords.z - chairCoords.z
+
+                    if math.sqrt(cx * cx + cy * cy + cz * cz) < 0.18 then
+                        duplicateChair = true
+                        break
+                    end
+                end
+            end
+
+            if (hash == tableHash and tableDistance < 0.18)
+                or (hash == boardHash and boardDistance < 0.18)
+                or duplicateChair
+                or (pieceHashes[hash] and boardDistance < 0.62)
+            then
+                deleteEntity(entity)
+            end
+        end
+    end
+end
+
 local function squareOffset(square)
     square = tostring(square or ''):lower()
 
@@ -856,6 +955,13 @@ local function animateEntityToOffset(rendered, entity, offset, duration, lift, d
 end
 
 local function deletePiece(rendered, square)
+    rendered.pieceSpawns = rendered.pieceSpawns or {}
+
+    if rendered.pieceSpawns[square] then
+        rendered.pieceSpawns[square].cancelled = true
+        rendered.pieceSpawns[square] = nil
+    end
+
     local entity = rendered.pieces[square]
 
     if entity then
@@ -865,12 +971,40 @@ local function deletePiece(rendered, square)
     end
 end
 
-local function spawnPiece(rendered, pieceCode, square)
+local function spawnPiece(rendered, pieceCode, square, boardSyncVersion)
     local model = Config.Props.pieces[pieceCode]
 
-    if not model or not rendered.board then
+    if not model
+        or not rendered.board
+        or rendered.destroyed
+        or (boardSyncVersion and rendered.boardSyncVersion ~= boardSyncVersion)
+    then
         return nil
     end
+
+    rendered.pieceSpawns = rendered.pieceSpawns or {}
+
+    local pending = rendered.pieceSpawns[square]
+
+    if pending
+        and not pending.cancelled
+        and pending.code == pieceCode
+    then
+        pending.boardSyncVersion = boardSyncVersion
+        return nil
+    end
+
+    if pending then
+        pending.cancelled = true
+    end
+
+    local token = {
+        code = pieceCode,
+        boardSyncVersion = boardSyncVersion,
+        cancelled = false
+    }
+
+    rendered.pieceSpawns[square] = token
 
     local coords = GetEntityCoords(rendered.board)
     local piece = createObject(model, {
@@ -880,7 +1014,30 @@ local function spawnPiece(rendered, pieceCode, square)
     })
 
     if not piece then
+        if rendered.pieceSpawns[square] == token then
+            rendered.pieceSpawns[square] = nil
+        end
+
         return nil
+    end
+
+    if rendered.destroyed
+        or token.cancelled
+        or rendered.pieceSpawns[square] ~= token
+        or (token.boardSyncVersion and rendered.boardSyncVersion ~= token.boardSyncVersion)
+        or not rendered.board
+        or not DoesEntityExist(rendered.board)
+    then
+        deleteEntity(piece)
+        return nil
+    end
+
+    local existing = rendered.pieces[square]
+
+    if existing and DoesEntityExist(existing) then
+        rendered.pieceSpawns[square] = nil
+        deleteEntity(piece)
+        return existing
     end
 
     SetEntityCollision(piece, false, false)
@@ -889,6 +1046,7 @@ local function spawnPiece(rendered, pieceCode, square)
 
     rendered.pieces[square] = piece
     rendered.pieceCodes[square] = pieceCode
+    rendered.pieceSpawns[square] = nil
 
     return piece
 end
@@ -898,6 +1056,18 @@ local function moveRenderedPiece(rendered, from, to, pieceCode)
 
     if not entity then
         return false
+    end
+
+    rendered.pieceSpawns = rendered.pieceSpawns or {}
+
+    if rendered.pieceSpawns[from] then
+        rendered.pieceSpawns[from].cancelled = true
+        rendered.pieceSpawns[from] = nil
+    end
+
+    if rendered.pieceSpawns[to] then
+        rendered.pieceSpawns[to].cancelled = true
+        rendered.pieceSpawns[to] = nil
     end
 
     rendered.pieces[from] = nil
@@ -1053,7 +1223,7 @@ end
 function crChessSpawnCapturedPiece(rendered, side, pieceCode, index)
     local model = Config.Props.pieces[pieceCode]
 
-    if not model or not rendered or not rendered.board then
+    if not model or not rendered or not rendered.board or rendered.destroyed then
         return nil
     end
 
@@ -1068,6 +1238,11 @@ function crChessSpawnCapturedPiece(rendered, side, pieceCode, index)
         return nil
     end
 
+    if rendered.destroyed or not rendered.board or not DoesEntityExist(rendered.board) then
+        deleteEntity(piece)
+        return nil
+    end
+
     SetEntityCollision(piece, false, false)
     SetEntityVisible(piece, true, false)
     attachEntityToBoardOffset(piece, rendered.board, crChessCapturedOffset(side, index))
@@ -1079,14 +1254,21 @@ local function clearCapturedSide(rendered, side)
     local entries = rendered.captured[side]
 
     for _, entry in ipairs(entries) do
+        entry.cancelled = true
         deleteEntity(entry.entity)
     end
 
     rendered.captured[side] = {}
+    rendered.capturedSyncVersions = rendered.capturedSyncVersions or {}
+    rendered.capturedSyncVersions[side] = (rendered.capturedSyncVersions[side] or 0) + 1
 end
 
 function crChessSyncCapturedSide(rendered, side, codes)
     codes = codes or {}
+    rendered.capturedSyncVersions = rendered.capturedSyncVersions or {}
+    rendered.capturedSyncVersions[side] = (rendered.capturedSyncVersions[side] or 0) + 1
+
+    local syncVersion = rendered.capturedSyncVersions[side]
 
     local oldEntries = rendered.captured[side] or {}
     local nextEntries = {}
@@ -1096,13 +1278,33 @@ function crChessSyncCapturedSide(rendered, side, codes)
 
         if not entry or entry.code ~= pieceCode or not entry.entity or not DoesEntityExist(entry.entity) then
             if entry then
+                entry.cancelled = true
                 deleteEntity(entry.entity)
             end
 
             entry = {
                 code = pieceCode,
-                entity = crChessSpawnCapturedPiece(rendered, side, pieceCode, index)
+                entity = nil,
+                index = index,
+                spawning = true,
+                cancelled = false
             }
+
+            oldEntries[index] = entry
+            rendered.captured[side] = oldEntries
+
+            local entity = crChessSpawnCapturedPiece(rendered, side, pieceCode, index)
+
+            if rendered.destroyed
+                or entry.cancelled
+                or rendered.capturedSyncVersions[side] ~= syncVersion
+            then
+                deleteEntity(entity)
+                return
+            end
+
+            entry.entity = entity
+            entry.spawning = false
         end
 
         if entry.entity and DoesEntityExist(entry.entity) then
@@ -1123,10 +1325,17 @@ function crChessSyncCapturedSide(rendered, side, codes)
     end
 
     for index = #codes + 1, #oldEntries do
-        deleteEntity(oldEntries[index] and oldEntries[index].entity)
+        local entry = oldEntries[index]
+
+        if entry then
+            entry.cancelled = true
+            deleteEntity(entry.entity)
+        end
     end
 
-    rendered.captured[side] = nextEntries
+    if rendered.capturedSyncVersions[side] == syncVersion then
+        rendered.captured[side] = nextEntries
+    end
 end
 
 local function reconcileCaptured(rendered, capturedWhite, capturedBlack)
@@ -1166,6 +1375,16 @@ function crChessCollectCapturedPiece(rendered, pieceCode, entity, snapshot)
     SetEntityCollision(entity, false, false)
     SetEntityVisible(entity, true, false)
     rendered.captured[side] = rendered.captured[side] or {}
+    rendered.capturedSyncVersions = rendered.capturedSyncVersions or {}
+    rendered.capturedSyncVersions[side] = (rendered.capturedSyncVersions[side] or 0) + 1
+
+    local previous = rendered.captured[side][index]
+
+    if previous and previous.entity ~= entity then
+        previous.cancelled = true
+        deleteEntity(previous.entity)
+    end
+
     rendered.captured[side][index] = {
         code = pieceCode,
         entity = entity,
@@ -1244,6 +1463,18 @@ function crChessAnimateBoardReset(rendered, board, resetKey)
     end
 
     rendered.resetBoardKey = resetKey
+    rendered.boardSyncVersion = (rendered.boardSyncVersion or 0) + 1
+
+    local resetSyncVersion = rendered.boardSyncVersion
+
+    for square, pending in pairs(rendered.pieceSpawns or {}) do
+        pending.cancelled = true
+        rendered.pieceSpawns[square] = nil
+    end
+
+    rendered.capturedSyncVersions = rendered.capturedSyncVersions or {}
+    rendered.capturedSyncVersions.white = (rendered.capturedSyncVersions.white or 0) + 1
+    rendered.capturedSyncVersions.black = (rendered.capturedSyncVersions.black or 0) + 1
 
     local queues = {}
 
@@ -1253,6 +1484,7 @@ function crChessAnimateBoardReset(rendered, board, resetKey)
 
     for _, side in ipairs({ 'white', 'black' }) do
         for _, entry in ipairs(rendered.captured[side] or {}) do
+            entry.cancelled = true
             crChessQueueResetEntity(queues, entry.code, entry.entity)
         end
     end
@@ -1279,6 +1511,10 @@ function crChessAnimateBoardReset(rendered, board, resetKey)
     end
 
     for index, square in ipairs(order) do
+        if rendered.boardSyncVersion ~= resetSyncVersion then
+            break
+        end
+
         local pieceCode = board[square]
         local entity = crChessPopResetEntity(queues, pieceCode)
 
@@ -1297,6 +1533,10 @@ function crChessAnimateBoardReset(rendered, board, resetKey)
             end)
         else
             spawnPiece(rendered, pieceCode, square)
+
+            if rendered.boardSyncVersion ~= resetSyncVersion then
+                break
+            end
         end
     end
 
@@ -1311,7 +1551,19 @@ end
 
 local function reconcilePieces(rendered, board)
     board = board or {}
+    rendered.boardSyncVersion = (rendered.boardSyncVersion or 0) + 1
+
+    local boardSyncVersion = rendered.boardSyncVersion
     local staleSquares = {}
+
+    for square, pending in pairs(rendered.pieceSpawns or {}) do
+        if board[square] ~= pending.code then
+            pending.cancelled = true
+            rendered.pieceSpawns[square] = nil
+        else
+            pending.boardSyncVersion = boardSyncVersion
+        end
+    end
 
     for square, pieceCode in pairs(rendered.pieceCodes) do
         if board[square] ~= pieceCode then
@@ -1324,9 +1576,17 @@ local function reconcilePieces(rendered, board)
     end
 
     for square, pieceCode in pairs(board) do
+        if rendered.boardSyncVersion ~= boardSyncVersion then
+            return
+        end
+
         if rendered.pieceCodes[square] ~= pieceCode then
             deletePiece(rendered, square)
-            spawnPiece(rendered, pieceCode, square)
+            spawnPiece(rendered, pieceCode, square, boardSyncVersion)
+
+            if rendered.boardSyncVersion ~= boardSyncVersion then
+                return
+            end
         end
     end
 end
@@ -1370,6 +1630,15 @@ local function applyLastMove(rendered, snapshot)
 
     if not capturedSquare and lastMove.capturedPiece then
         capturedSquare = lastMove.to
+    end
+
+    rendered.pieceSpawns = rendered.pieceSpawns or {}
+
+    for _, square in ipairs({ lastMove.from, capturedSquare, lastMove.to }) do
+        if square and rendered.pieceSpawns[square] then
+            rendered.pieceSpawns[square].cancelled = true
+            rendered.pieceSpawns[square] = nil
+        end
     end
 
     if capturedSquare then
@@ -1445,6 +1714,10 @@ local function applyLastMove(rendered, snapshot)
 end
 
 local function spawnChair(rendered, chairConfig)
+    if rendered.destroyed or not rendered.table or not DoesEntityExist(rendered.table) then
+        return
+    end
+
     local offset = chairConfig.offset
     local chairPos = GetOffsetFromEntityInWorldCoords(rendered.table, offset.x, offset.y, offset.z)
     local foundGround, groundZ = GetGroundZFor_3dCoord(chairPos.x, chairPos.y, chairPos.z + 5.0, false)
@@ -1463,6 +1736,11 @@ local function spawnChair(rendered, chairConfig)
         return
     end
 
+    if rendered.destroyed or not rendered.table or not DoesEntityExist(rendered.table) then
+        deleteEntity(chair)
+        return
+    end
+
     SetEntityHeading(chair, GetEntityHeading(rendered.table) + chairConfig.headingOffset)
     PlaceObjectOnGroundProperly(chair)
     SetEntityCollision(chair, true, true)
@@ -1477,6 +1755,11 @@ local function cleanupTable(tableId)
     if not rendered then
         return
     end
+
+    rendered.destroyed = true
+    rendered.building = false
+    rendered.pendingSnapshot = nil
+    renderedTables[tableId] = nil
 
     if crChessDestroyAmbientDui then
         crChessDestroyAmbientDui(tableId)
@@ -1512,12 +1795,16 @@ local function cleanupTable(tableId)
     clearBotPed(rendered)
     deleteEntity(rendered.board)
     deleteEntity(rendered.table)
-    renderedTables[tableId] = nil
 end
 
 local function renderTable(tableData)
     if renderedTables[tableData.id] then
         local rendered = renderedTables[tableData.id]
+
+        if rendered.building then
+            rendered.pendingSnapshot = tableData
+            return
+        end
 
         if not rendered.table
             or not DoesEntityExist(rendered.table)
@@ -1536,6 +1823,7 @@ local function renderTable(tableData)
             local didReset = (not moving) and resetKey and crChessShouldAnimateBoardReset(rendered, tableData.board, resetKey)
 
             rendered.snapshot = tableData
+            rendered.matchId = tableData.matchId
             updateTableBlip(tableData)
 
             if didReset then
@@ -1557,6 +1845,46 @@ local function renderTable(tableData)
         end
     end
 
+    local rendered = {
+        table = nil,
+        board = nil,
+        chairs = {},
+        pieces = {},
+        pieceCodes = {},
+        pieceSpawns = {},
+        boardSyncVersion = 0,
+        captured = {
+            white = {},
+            black = {}
+        },
+        capturedWhiteCodes = {},
+        capturedBlackCodes = {},
+        capturedSyncVersions = {
+            white = 0,
+            black = 0
+        },
+        botPed = nil,
+        botPeds = {},
+        botPedModels = {},
+        botPedSpawns = {},
+        releasedBotPeds = {},
+        botMatchId = nil,
+        seatAvatars = {},
+        seatAvatarSpawns = {},
+        matchId = tableData.matchId,
+        moveAnimationUntil = 0,
+        moveAnimationKey = nil,
+        resetBoardKey = nil,
+        lastMoveKey = nil,
+        snapshot = tableData,
+        pendingSnapshot = nil,
+        building = true,
+        destroyed = false,
+        targetSystem = nil
+    }
+
+    renderedTables[tableData.id] = rendered
+
     local coords = toVector3(tableData.coords)
     local tableObject = createObject(Config.Props.table, {
         x = coords.x,
@@ -1565,9 +1893,19 @@ local function renderTable(tableData)
     })
 
     if not tableObject then
+        if renderedTables[tableData.id] == rendered then
+            renderedTables[tableData.id] = nil
+        end
+
         return
     end
 
+    if rendered.destroyed or renderedTables[tableData.id] ~= rendered then
+        deleteEntity(tableObject)
+        return
+    end
+
+    rendered.table = tableObject
     SetEntityHeading(tableObject, tableData.heading or 0.0)
     PlaceObjectOnGroundProperly(tableObject)
     FreezeEntityPosition(tableObject, true)
@@ -1580,10 +1918,16 @@ local function renderTable(tableData)
     })
 
     if not boardObject then
-        deleteEntity(tableObject)
+        cleanupTable(tableData.id)
         return
     end
 
+    if rendered.destroyed or renderedTables[tableData.id] ~= rendered then
+        deleteEntity(boardObject)
+        return
+    end
+
+    rendered.board = boardObject
     SetEntityCollision(boardObject, false, false)
     SetEntityVisible(boardObject, true, false)
     AttachEntityToEntity(
@@ -1604,43 +1948,30 @@ local function renderTable(tableData)
         true
     )
 
-    renderedTables[tableData.id] = {
-        table = tableObject,
-        board = boardObject,
-        chairs = {},
-        pieces = {},
-        pieceCodes = {},
-        captured = {
-            white = {},
-            black = {}
-        },
-        capturedWhiteCodes = {},
-        capturedBlackCodes = {},
-        botPed = nil,
-        botPeds = {},
-        botPedModels = {},
-        releasedBotPeds = {},
-        botMatchId = nil,
-        seatAvatars = {},
-        matchId = tableData.matchId,
-        moveAnimationUntil = 0,
-        moveAnimationKey = nil,
-        resetBoardKey = nil,
-        lastMoveKey = nil,
-        snapshot = tableData,
-        targetSystem = nil
-    }
-
-    registerTableTargets(tableData.id, renderedTables[tableData.id])
-    updateTableBlip(tableData)
-
     for _, chairConfig in ipairs(Config.Chairs) do
-        spawnChair(renderedTables[tableData.id], chairConfig)
+        spawnChair(rendered, chairConfig)
     end
 
-    reconcilePieces(renderedTables[tableData.id], tableData.board)
-    reconcileCaptured(renderedTables[tableData.id], tableData.capturedWhite, tableData.capturedBlack)
-    reconcileSeatAvatars(renderedTables[tableData.id], tableData)
+    local latest = tableData
+
+    repeat
+        latest = rendered.pendingSnapshot or latest
+        rendered.pendingSnapshot = nil
+        rendered.snapshot = latest
+        rendered.matchId = latest.matchId
+        reconcilePieces(rendered, latest.board)
+        reconcileCaptured(rendered, latest.capturedWhite, latest.capturedBlack)
+    until not rendered.pendingSnapshot
+
+    if rendered.destroyed or renderedTables[tableData.id] ~= rendered then
+        return
+    end
+
+    rendered.building = false
+    crChessPurgeDuplicateTableObjects(rendered)
+    registerTableTargets(tableData.id, rendered)
+    updateTableBlip(latest)
+    reconcileSeatAvatars(rendered, latest)
 
     if currentMatch and currentMatch.tableId == tableData.id then
         ensureSeatForMatch(currentMatch)
@@ -3112,6 +3443,11 @@ local function showLocalSeatAvatar()
 end
 
 local function deleteSeatAvatar()
+    if seated.avatarSpawning then
+        seated.avatarSpawning.cancelled = true
+        seated.avatarSpawning = nil
+    end
+
     if seated.avatar then
         deleteEntity(seated.avatar)
         seated.avatar = nil
@@ -3161,6 +3497,14 @@ end
 local function createSeatAvatar(rendered, color)
     deleteSeatAvatar()
 
+    local token = {
+        tableId = seated.tableId,
+        color = color,
+        cancelled = false
+    }
+
+    seated.avatarSpawning = token
+
     local sourcePed = PlayerPedId()
     local avatar = nil
 
@@ -3179,6 +3523,9 @@ local function createSeatAvatar(rendered, color)
 
             if GetGameTimer() > expiresAt then
                 print('[cr-chess seat] failed to load player model for seat avatar')
+                if seated.avatarSpawning == token then
+                    seated.avatarSpawning = nil
+                end
                 return nil
             end
         end
@@ -3189,9 +3536,23 @@ local function createSeatAvatar(rendered, color)
     end
 
     if not avatar or not DoesEntityExist(avatar) then
+        if seated.avatarSpawning == token then
+            seated.avatarSpawning = nil
+        end
+
         return nil
     end
 
+    if token.cancelled
+        or seated.avatarSpawning ~= token
+        or seated.tableId ~= token.tableId
+        or seated.color ~= token.color
+    then
+        deleteEntity(avatar)
+        return nil
+    end
+
+    seated.avatarSpawning = nil
     SetEntityAsMissionEntity(avatar, true, true)
     SetEntityInvincible(avatar, true)
     SetPedCanRagdoll(avatar, false)
@@ -3554,7 +3915,11 @@ ensureSeatForMatch = function(snapshot)
         local rendered = renderedTables[snapshot.tableId]
         local ped = localSeatPed()
 
-        if useSeatAvatarForPlayer() and (not seated.avatar or not DoesEntityExist(seated.avatar)) and rendered then
+        if useSeatAvatarForPlayer()
+            and not seated.avatarSpawning
+            and (not seated.avatar or not DoesEntityExist(seated.avatar))
+            and rendered
+        then
             seatPlayer(rendered, color, snapshot.tableId)
             return
         end
@@ -3784,9 +4149,18 @@ local function hideRemoteSeatSource(source)
 end
 
 local function deleteSeatAvatarEntry(rendered, color)
-    if not rendered or not rendered.seatAvatars then
+    if not rendered then
         return
     end
+
+    rendered.seatAvatarSpawns = rendered.seatAvatarSpawns or {}
+
+    if rendered.seatAvatarSpawns[color] then
+        rendered.seatAvatarSpawns[color].cancelled = true
+        rendered.seatAvatarSpawns[color] = nil
+    end
+
+    rendered.seatAvatars = rendered.seatAvatars or {}
 
     local entry = rendered.seatAvatars[color]
 
@@ -3866,6 +4240,7 @@ end
 
 local function reconcileSeatAvatar(rendered, tableData, color)
     rendered.seatAvatars = rendered.seatAvatars or {}
+    rendered.seatAvatarSpawns = rendered.seatAvatarSpawns or {}
 
     local seat = tableData and tableData.seats and tableData.seats[color] or nil
     local source = seat and tonumber(seat.source) or nil
@@ -3883,6 +4258,13 @@ local function reconcileSeatAvatar(rendered, tableData, color)
     end
 
     if entry and entry.ped and DoesEntityExist(entry.ped) then
+        local pending = rendered.seatAvatarSpawns[color]
+
+        if pending then
+            pending.cancelled = true
+            rendered.seatAvatarSpawns[color] = nil
+        end
+
         hideRemoteSeatSource(source)
 
         if not isSeatAnimationLocked(entry.ped) then
@@ -3897,12 +4279,42 @@ local function reconcileSeatAvatar(rendered, tableData, color)
         return
     end
 
-    local avatar = createRemoteSeatAvatar(rendered, color, source)
+    local pending = rendered.seatAvatarSpawns[color]
 
-    if not avatar then
+    if pending and not pending.cancelled and pending.source == source then
         return
     end
 
+    if pending then
+        pending.cancelled = true
+    end
+
+    local token = {
+        source = source,
+        cancelled = false
+    }
+
+    rendered.seatAvatarSpawns[color] = token
+
+    local avatar = createRemoteSeatAvatar(rendered, color, source)
+
+    if not avatar then
+        if rendered.seatAvatarSpawns[color] == token then
+            rendered.seatAvatarSpawns[color] = nil
+        end
+
+        return
+    end
+
+    if rendered.destroyed
+        or token.cancelled
+        or rendered.seatAvatarSpawns[color] ~= token
+    then
+        deleteEntity(avatar)
+        return
+    end
+
+    rendered.seatAvatarSpawns[color] = nil
     hideRemoteSeatSource(source)
     rendered.seatAvatars[color] = {
         source = source,
@@ -4179,6 +4591,86 @@ function botPedModelForColor(snapshot, color)
     return pool[index]
 end
 
+function crChessPurgeDuplicateBotPeds(rendered)
+    if not rendered
+        or rendered.destroyed
+        or type(GetGamePool) ~= 'function'
+        or not rendered.table
+        or not DoesEntityExist(rendered.table)
+    then
+        return
+    end
+
+    local keep = {}
+    local modelHashes = {}
+
+    for _, model in ipairs(botPedModelPool()) do
+        modelHashes[joaat(model)] = true
+    end
+
+    for _, ped in pairs(rendered.botPeds or {}) do
+        if ped then
+            keep[ped] = true
+        end
+    end
+
+    for _, entry in pairs(rendered.seatAvatars or {}) do
+        if entry.ped then
+            keep[entry.ped] = true
+        end
+    end
+
+    for _, ped in ipairs(rendered.releasedBotPeds or {}) do
+        if ped then
+            keep[ped] = true
+        end
+    end
+
+    if seated.avatar then
+        keep[seated.avatar] = true
+    end
+
+    if tunePreview.ped then
+        keep[tunePreview.ped] = true
+    end
+
+    for _, player in ipairs(GetActivePlayers()) do
+        keep[GetPlayerPed(player)] = true
+    end
+
+    local seatPositions = {}
+
+    for _, color in ipairs({ 'white', 'black' }) do
+        local transform = seatTransform(rendered, color)
+
+        if transform and transform.pos then
+            seatPositions[#seatPositions + 1] = transform.pos
+        end
+    end
+
+    for _, ped in ipairs(GetGamePool('CPed')) do
+        if ped
+            and DoesEntityExist(ped)
+            and not keep[ped]
+        then
+            local coords = GetEntityCoords(ped)
+            local botModel = modelHashes[GetEntityModel(ped)] == true
+
+            for _, seatPos in ipairs(seatPositions) do
+                local dx = coords.x - seatPos.x
+                local dy = coords.y - seatPos.y
+                local dz = coords.z - seatPos.z
+                local maxDistance = botModel and 0.42 or 0.22
+
+                if math.sqrt(dx * dx + dy * dy + dz * dz) < maxDistance then
+                    deleteEntity(ped)
+                    break
+                end
+            end
+        end
+    end
+end
+
 function crChessForgetReleasedBotPed(rendered, ped)
     if not rendered or not rendered.releasedBotPeds or not ped then
         return
@@ -4244,8 +4736,14 @@ clearBotPed = function(rendered, color, leave)
 
     rendered.botPeds = rendered.botPeds or {}
     rendered.botPedModels = rendered.botPedModels or {}
+    rendered.botPedSpawns = rendered.botPedSpawns or {}
 
     if color then
+        if rendered.botPedSpawns[color] then
+            rendered.botPedSpawns[color].cancelled = true
+            rendered.botPedSpawns[color] = nil
+        end
+
         local ped = rendered.botPeds[color]
 
         if leave then
@@ -4264,6 +4762,11 @@ clearBotPed = function(rendered, color, leave)
     end
 
     local deleted = {}
+
+    for botColor, token in pairs(rendered.botPedSpawns) do
+        token.cancelled = true
+        rendered.botPedSpawns[botColor] = nil
+    end
 
     if rendered.botPed then
         deleted[rendered.botPed] = true
@@ -4305,6 +4808,8 @@ ensureBotPedForMatch = function(snapshot)
         return
     end
 
+    crChessPurgeDuplicateBotPeds(rendered)
+
     if snapshot.state == 'finished' then
         clearBotPed(rendered, nil, true)
         rendered.botMatchId = nil
@@ -4322,6 +4827,7 @@ ensureBotPedForMatch = function(snapshot)
 
     rendered.botPeds = rendered.botPeds or {}
     rendered.botPedModels = rendered.botPedModels or {}
+    rendered.botPedSpawns = rendered.botPedSpawns or {}
 
     for _, botColor in ipairs({ 'white', 'black' }) do
         if botDifficultyForColor(snapshot, botColor) then
@@ -4347,28 +4853,67 @@ ensureBotPedForMatch = function(snapshot)
                     FreezeEntityPosition(existing, true)
                 end
             else
-                local hash = loadModel(model)
+                local pending = rendered.botPedSpawns[botColor]
 
-                if hash then
-                    local tableCoords = GetEntityCoords(rendered.table)
-                    local ped = CreatePed(4, hash, tableCoords.x, tableCoords.y, tableCoords.z, GetEntityHeading(rendered.table), false, true)
-                    SetModelAsNoLongerNeeded(hash)
+                if not pending
+                    or pending.cancelled
+                    or pending.matchId ~= snapshot.id
+                    or pending.model ~= model
+                then
+                    if pending then
+                        pending.cancelled = true
+                    end
 
-                    if ped and DoesEntityExist(ped) then
-                        SetEntityInvincible(ped, true)
-                        SetBlockingOfNonTemporaryEvents(ped, true)
-                        SetEntityCollision(ped, false, false)
-                        SetEntityAlpha(ped, Config.BotPed and Config.BotPed.alpha or 255, false)
+                    local token = {
+                        matchId = snapshot.id,
+                        model = model,
+                        cancelled = false
+                    }
 
-                        if type(SetPedDefaultComponentVariation) == 'function' then
-                            SetPedDefaultComponentVariation(ped)
+                    rendered.botPedSpawns[botColor] = token
+
+                    local hash = loadModel(model)
+
+                    if hash
+                        and not rendered.destroyed
+                        and not token.cancelled
+                        and rendered.botPedSpawns[botColor] == token
+                        and rendered.botMatchId == snapshot.id
+                    then
+                        local tableCoords = GetEntityCoords(rendered.table)
+                        local ped = CreatePed(4, hash, tableCoords.x, tableCoords.y, tableCoords.z, GetEntityHeading(rendered.table), false, true)
+                        SetModelAsNoLongerNeeded(hash)
+
+                        if rendered.destroyed
+                            or token.cancelled
+                            or rendered.botPedSpawns[botColor] ~= token
+                            or rendered.botMatchId ~= snapshot.id
+                        then
+                            deleteEntity(ped)
+                        elseif ped and DoesEntityExist(ped) then
+                            SetEntityInvincible(ped, true)
+                            SetBlockingOfNonTemporaryEvents(ped, true)
+                            SetEntityCollision(ped, false, false)
+                            SetEntityAlpha(ped, Config.BotPed and Config.BotPed.alpha or 255, false)
+
+                            if type(SetPedDefaultComponentVariation) == 'function' then
+                                SetPedDefaultComponentVariation(ped)
+                            end
+
+                            rendered.botPeds[botColor] = ped
+                            rendered.botPedModels[botColor] = model
+                            rendered.botMatchId = snapshot.id
+                            rendered.botPed = ped
+                            seatLocalPedOnTable(ped, rendered, botColor, true)
                         end
+                    end
 
-                        rendered.botPeds[botColor] = ped
-                        rendered.botPedModels[botColor] = model
-                        rendered.botMatchId = snapshot.id
-                        rendered.botPed = ped
-                        seatLocalPedOnTable(ped, rendered, botColor, true)
+                    if hash then
+                        SetModelAsNoLongerNeeded(hash)
+                    end
+
+                    if rendered.botPedSpawns[botColor] == token then
+                        rendered.botPedSpawns[botColor] = nil
                     end
                 end
             end
@@ -6687,10 +7232,12 @@ CreateThread(function()
     while true do
         Wait(1000)
 
-        if useRemoteSeatAvatars() then
-            for _, rendered in pairs(renderedTables) do
+        for _, rendered in pairs(renderedTables) do
+            if useRemoteSeatAvatars() then
                 reconcileSeatAvatars(rendered, rendered.snapshot or {})
             end
+
+            crChessPurgeDuplicateBotPeds(rendered)
         end
     end
 end)
